@@ -29,6 +29,8 @@ class AdvancedWebsiteDownloader:
         })
         
         self.driver = None
+        self.visited_urls = set()
+        self.max_pages = 10  # Limit to prevent downloading entire site
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -117,6 +119,76 @@ class AdvancedWebsiteDownloader:
             print(f"❌ Error during manual solve: {e}")
             return False
 
+    def discover_and_download_links(self, html, base_url, downloaded_content, depth=0):
+        """Discover and download linked pages"""
+        if depth >= 2:  # Limit recursion depth
+            return
+            
+        soup = BeautifulSoup(html, 'html.parser')
+        links = soup.find_all('a', href=True)
+        
+        print(f"    🔍 Found {len(links)} links on page")
+        
+        internal_links = []
+        for link in links:
+            href = link['href']
+            if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                full_url = urljoin(base_url, href)
+                
+                # Check if it's an internal link (same domain)
+                if self.is_same_domain(full_url, base_url) and full_url not in self.visited_urls:
+                    internal_links.append(full_url)
+        
+        # Download internal links (limit to prevent too many downloads)
+        for i, link_url in enumerate(internal_links[:5]):  # Limit to 5 links per page
+            if len(downloaded_content['pages']) >= self.max_pages:
+                print("    ⚠️ Reached maximum page limit")
+                break
+                
+            if link_url not in self.visited_urls:
+                print(f"    📄 [{i+1}/{len(internal_links[:5])}] Downloading linked page: {link_url}")
+                self.download_page_recursive(link_url, downloaded_content, depth + 1)
+
+    def is_same_domain(self, url1, url2):
+        """Check if two URLs are from the same domain"""
+        domain1 = urlparse(url1).netloc
+        domain2 = urlparse(url2).netloc
+        return domain1 == domain2
+
+    def download_page_recursive(self, url, downloaded_content, depth=0):
+        """Download a page and its linked pages recursively"""
+        if url in self.visited_urls or len(downloaded_content['pages']) >= self.max_pages:
+            return
+            
+        self.visited_urls.add(url)
+        
+        try:
+            print(f"    📄 Downloading page: {url}")
+            response = self.session.get(url, timeout=30)
+            if response.status_code == 200:
+                page_data = {
+                    'url': response.url,
+                    'content': response.text,
+                    'content_type': response.headers.get('content-type', 'text/html'),
+                    'status_code': 200,
+                    'downloaded_with': 'session',
+                    'depth': depth
+                }
+                downloaded_content['pages'][url] = page_data
+                downloaded_content['pages'][response.url] = page_data
+                print(f"    ✅ Downloaded: {response.url}")
+                
+                # Download resources for this page
+                self.download_all_resources(response.text, response.url, downloaded_content)
+                
+                # Discover and download linked pages
+                self.discover_and_download_links(response.text, response.url, downloaded_content, depth)
+                
+            else:
+                print(f"    ❌ Page {url}: {response.status_code}")
+        except Exception as e:
+            print(f"    ❌ Error downloading {url}: {e}")
+
     def download_with_session(self, url):
         """Download using captured session"""
         print("⬇️ Downloading with session...")
@@ -128,32 +200,10 @@ class AdvancedWebsiteDownloader:
             'timestamp': time.time(),
         }
         
-        # Download main page
-        try:
-            print("    📄 Downloading main page...")
-            response = self.session.get(url, timeout=30)
-            if response.status_code == 200:
-                main_page_data = {
-                    'url': response.url,
-                    'content': response.text,
-                    'content_type': response.headers.get('content-type', 'text/html'),
-                    'status_code': 200,
-                    'downloaded_with': 'session'
-                }
-                downloaded_content['pages'][url] = main_page_data
-                downloaded_content['pages'][response.url] = main_page_data
-                print(f"    ✅ Main page from {response.url}")
-                
-                # Extract and download ALL resources from main page
-                self.download_all_resources(response.text, response.url, downloaded_content)
-            else:
-                print(f"    ❌ Main page: {response.status_code}")
-                return None
-        except Exception as e:
-            print(f"    ❌ Main page error: {e}")
-            return None
+        # Start with main page
+        self.download_page_recursive(url, downloaded_content)
         
-        # Also try to get additional resources from the page after JavaScript execution
+        # Also try to get additional resources from the live DOM
         if self.driver:
             try:
                 print("    🔍 Extracting resources from live DOM...")
@@ -171,9 +221,13 @@ class AdvancedWebsiteDownloader:
                 }
                 downloaded_content['pages'][f"{current_url}_live"] = live_page_data
                 
+                # Discover links from live DOM too
+                self.discover_and_download_links(page_source, current_url, downloaded_content)
+                
             except Exception as e:
                 print(f"    ⚠️ Could not extract from live DOM: {e}")
         
+        print(f"    📊 Total pages downloaded: {len(downloaded_content['pages'])}")
         print(f"    📊 Total assets downloaded: {len(downloaded_content['assets'])}")
         
         # Save file
@@ -449,6 +503,9 @@ class AdvancedWebsiteDownloader:
         """Main download method"""
         print(f"⬇️ Target: {url}")
         
+        # Reset visited URLs for this download
+        self.visited_urls = set()
+        
         # Manual Cloudflare solve
         if not self.manual_cloudflare_solve(url):
             print("❌ Failed to setup Chrome session")
@@ -499,9 +556,9 @@ class AdvancedWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*50)
-    print("🚀 UNIVERSAL WEBSITE DOWNLOADER - INCOGNITO MODE")
-    print("📥 Downloads: CSS, JS, Images, Fonts, Media, and more!")
-    print("🌐 Works with any website (not just DeepSeek)")
+    print("🚀 ENHANCED WEBSITE DOWNLOADER - WITH LINK DISCOVERY")
+    print("📥 Downloads: Multiple pages, CSS, JS, Images, Fonts, and more!")
+    print("🌐 Works with any website")
     print("="*50)
     
     # You can add any websites here
@@ -522,7 +579,7 @@ if __name__ == "__main__":
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded {len(files)} sites with ALL assets")
+        print(f"\n🎉 Success! Downloaded {len(files)} sites with multiple pages and assets")
         print("💡 Now run the browser.py to view your downloaded sites!")
     else:
         print(f"\n❌ No sites downloaded")
