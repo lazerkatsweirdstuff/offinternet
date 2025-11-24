@@ -28,33 +28,19 @@ class AdvancedWebsiteDownloader:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
+        self.driver = None
+        
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
             print(f"✅ Created directory: {self.output_dir}")
 
-    def get_chrome_user_data_dir(self):
-        """Get Chrome user data directory"""
-        if os.name == 'nt':  # Windows
-            app_data = os.getenv('LOCALAPPDATA')
-            return os.path.join(app_data, 'Google', 'Chrome', 'User Data')
-        else:  # Linux/Mac
-            home = os.path.expanduser('~')
-            return os.path.join(home, '.config', 'google-chrome')
-
-    def setup_chrome_normal(self):
-        """Setup Chrome with normal profile"""
+    def setup_chrome_incognito(self):
+        """Setup Chrome with incognito mode"""
         try:
             chrome_options = Options()
             
-            # Get user data directory
-            user_data_dir = self.get_chrome_user_data_dir()
-            
-            # Use normal Chrome profile
-            chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-            chrome_options.add_argument("--profile-directory=Default")
-            
-            # Important: Use a custom profile to avoid conflicts with running Chrome
-            chrome_options.add_argument("--profile-directory=TempSeleniumProfile")
+            # Use incognito mode to avoid profile conflicts
+            chrome_options.add_argument("--incognito")
             
             # Standard options
             chrome_options.add_argument("--no-sandbox")
@@ -68,49 +54,19 @@ class AdvancedWebsiteDownloader:
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
-            # Don't use the default profile to avoid conflicts
-            chrome_options.add_argument("--no-first-run")
-            chrome_options.add_argument("--no-default-browser-check")
+            # Additional options for better compatibility
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-plugins")
+            chrome_options.add_argument("--disable-popup-blocking")
             
-            print("🔄 Starting Chrome with normal profile...")
+            print("🔄 Starting Chrome in incognito mode...")
             self.driver = webdriver.Chrome(options=chrome_options)
             
             # Remove webdriver flag
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
-            self.driver.implicitly_wait(10)
-            print("✅ Chrome started successfully with normal profile")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Failed to start Chrome with normal profile: {e}")
-            print("🔄 Trying with temporary profile instead...")
-            return self.setup_chrome_temp()
-
-    def setup_chrome_temp(self):
-        """Setup Chrome with temporary profile (fallback)"""
-        try:
-            chrome_options = Options()
-            
-            # Use temporary profile
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1400,1000")
-            chrome_options.add_argument("--start-maximized")
-            
-            # Remove automation flags
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            
-            print("🔄 Starting Chrome with temporary profile...")
-            self.driver = webdriver.Chrome(options=chrome_options)
-            
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
-            self.driver.implicitly_wait(10)
-            print("✅ Chrome started successfully with temporary profile")
+            self.driver.implicitly_wait(15)
+            print("✅ Chrome started successfully in incognito mode")
             return True
             
         except Exception as e:
@@ -119,31 +75,30 @@ class AdvancedWebsiteDownloader:
 
     def manual_cloudflare_solve(self, url):
         """Manual Cloudflare solving"""
-        print("🚨 CLOUDFLARE SOLVER - NORMAL CHROME")
+        print("🚨 CLOUDFLARE SOLVER - INCOGNITO MODE")
         print("="*50)
-        print("Using your Chrome profile (not incognito)")
-        print("1. Chrome will open")
-        print("2. Solve Cloudflare challenge")
-        print("3. Press Enter when you see DeepSeek chat")
+        print("Using Chrome incognito mode (no profile conflicts)")
+        print("1. Chrome will open in incognito")
+        print("2. Solve any security challenges")
+        print("3. Press Enter when the page fully loads")
         print("="*50)
         
-        # Try normal profile first, then fallback to temp
-        if not self.setup_chrome_normal():
+        if not self.setup_chrome_incognito():
             return False
             
         try:
-            print("🌐 Opening DeepSeek...")
+            print(f"🌐 Opening: {url}")
             self.driver.get(url)
             
             print("\n" + "="*50)
-            print("💡 CHROME IS OPEN!")
+            print("💡 CHROME IS OPEN IN INCOGNITO MODE!")
             print("Please:")
-            print("1. Solve the Cloudflare challenge")
-            print("2. Wait for DeepSeek chat to load")
+            print("1. Solve any security challenges (Cloudflare, etc.)")
+            print("2. Wait for the page to fully load")
             print("3. Return here and press Enter")
             print("="*50)
             
-            input("⏳ Press Enter when you see DeepSeek chat...")
+            input("⏳ Press Enter when the page is fully loaded...")
             
             # Get current state
             current_url = self.driver.current_url
@@ -176,7 +131,7 @@ class AdvancedWebsiteDownloader:
         # Download main page
         try:
             print("    📄 Downloading main page...")
-            response = self.session.get(url, timeout=20)
+            response = self.session.get(url, timeout=30)
             if response.status_code == 200:
                 main_page_data = {
                     'url': response.url,
@@ -203,7 +158,19 @@ class AdvancedWebsiteDownloader:
             try:
                 print("    🔍 Extracting resources from live DOM...")
                 page_source = self.driver.page_source
-                self.download_all_resources(page_source, self.driver.current_url, downloaded_content)
+                current_url = self.driver.current_url
+                self.download_all_resources(page_source, current_url, downloaded_content)
+                
+                # Also save the live DOM version
+                live_page_data = {
+                    'url': current_url,
+                    'content': page_source,
+                    'content_type': 'text/html',
+                    'status_code': 200,
+                    'downloaded_with': 'selenium_live_dom'
+                }
+                downloaded_content['pages'][f"{current_url}_live"] = live_page_data
+                
             except Exception as e:
                 print(f"    ⚠️ Could not extract from live DOM: {e}")
         
@@ -532,16 +499,30 @@ class AdvancedWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*50)
-    print("🚀 ENHANCED WEBSITE DOWNLOADER - DOWNLOADS ALL FILES")
-    print("📥 Now downloads: CSS, JS, Images, Fonts, Media, and more!")
+    print("🚀 UNIVERSAL WEBSITE DOWNLOADER - INCOGNITO MODE")
+    print("📥 Downloads: CSS, JS, Images, Fonts, Media, and more!")
+    print("🌐 Works with any website (not just DeepSeek)")
     print("="*50)
     
-    sites = ["https://discord.com"]
+    # You can add any websites here
+    sites = [
+        "https://deepseek.com",
+        # Add more sites as needed
+    ]
+    
+    # Or get sites from user input
+    if len(sys.argv) > 1:
+        sites = sys.argv[1:]
+    else:
+        user_input = input("Enter websites to download (comma-separated, or press Enter for default): ").strip()
+        if user_input:
+            sites = [site.strip() for site in user_input.split(',')]
     
     downloader = AdvancedWebsiteDownloader()
     files = downloader.download_from_list(sites)
     
     if files:
         print(f"\n🎉 Success! Downloaded {len(files)} sites with ALL assets")
+        print("💡 Now run the browser.py to view your downloaded sites!")
     else:
         print(f"\n❌ No sites downloaded")
