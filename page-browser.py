@@ -1,591 +1,378 @@
 import os
-import requests
 import zipfile
 import json
-from urllib.parse import urlparse, urljoin
-from bs4 import BeautifulSoup
-import time
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+import webbrowser
+from urllib.parse import urlparse, unquote, urljoin
+import base64
 import hashlib
 import re
-import base64
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-import sys
+from bs4 import BeautifulSoup
 
-class AdvancedWebsiteDownloader:
-    def __init__(self, output_dir=None):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        if output_dir is None:
-            self.output_dir = os.path.join(script_dir, "downloaded_sites")
+def get_script_directory():
+    """Get the directory where the script is located"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+class PageFileBrowser:
+    def __init__(self, pages_directory=None):
+        # Always look in script directory by default
+        script_dir = get_script_directory()
+        if pages_directory is None:
+            self.pages_directory = os.path.join(script_dir, "downloaded_sites")
         else:
-            self.output_dir = os.path.abspath(output_dir)
+            self.pages_directory = os.path.abspath(pages_directory)
             
-        print(f"📁 Save location: {self.output_dir}")
+        print(f"📁 Script location: {script_dir}")
+        print(f"📁 Browser looking for .page files in: {self.pages_directory}")
+        self.loaded_sites = {}
         
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        
-        self.driver = None
-        self.visited_urls = set()
-        self.max_pages = 10  # Limit to prevent downloading entire site
-        
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-            print(f"✅ Created directory: {self.output_dir}")
-
-    def setup_chrome_incognito(self):
-        """Setup Chrome with incognito mode"""
-        try:
-            chrome_options = Options()
-            
-            # Use incognito mode to avoid profile conflicts
-            chrome_options.add_argument("--incognito")
-            
-            # Standard options
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1400,1000")
-            chrome_options.add_argument("--start-maximized")
-            
-            # Remove automation flags
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            
-            # Additional options for better compatibility
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-plugins")
-            chrome_options.add_argument("--disable-popup-blocking")
-            
-            print("🔄 Starting Chrome in incognito mode...")
-            self.driver = webdriver.Chrome(options=chrome_options)
-            
-            # Remove webdriver flag
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
-            self.driver.implicitly_wait(15)
-            print("✅ Chrome started successfully in incognito mode")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Failed to start Chrome: {e}")
-            return False
-
-    def manual_cloudflare_solve(self, url):
-        """Manual Cloudflare solving"""
-        print("🚨 CLOUDFLARE SOLVER - INCOGNITO MODE")
-        print("="*50)
-        print("Using Chrome incognito mode (no profile conflicts)")
-        print("1. Chrome will open in incognito")
-        print("2. Solve any security challenges")
-        print("3. Press Enter when the page fully loads")
-        print("="*50)
-        
-        if not self.setup_chrome_incognito():
-            return False
-            
-        try:
-            print(f"🌐 Opening: {url}")
-            self.driver.get(url)
-            
-            print("\n" + "="*50)
-            print("💡 CHROME IS OPEN IN INCOGNITO MODE!")
-            print("Please:")
-            print("1. Solve any security challenges (Cloudflare, etc.)")
-            print("2. Wait for the page to fully load")
-            print("3. Return here and press Enter")
-            print("="*50)
-            
-            input("⏳ Press Enter when the page is fully loaded...")
-            
-            # Get current state
-            current_url = self.driver.current_url
-            print(f"🔗 Current URL: {current_url}")
-            print(f"📄 Page title: {self.driver.title}")
-            
-            # Capture cookies
-            cookies = self.driver.get_cookies()
-            for cookie in cookies:
-                self.session.cookies.set(cookie['name'], cookie['value'])
-            
-            print(f"✅ Captured {len(cookies)} cookies")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error during manual solve: {e}")
-            return False
-
-    def discover_and_download_links(self, html, base_url, downloaded_content, depth=0):
-        """Discover and download linked pages"""
-        if depth >= 2:  # Limit recursion depth
+        # Check if directory exists
+        if not os.path.exists(self.pages_directory):
+            print(f"❌ ERROR: Directory not found: {self.pages_directory}")
+            print("Please run the downloader first or specify the correct path.")
+            print(f"Expected to find: downloaded_sites folder in {script_dir}")
             return
-            
-        soup = BeautifulSoup(html, 'html.parser')
-        links = soup.find_all('a', href=True)
         
-        print(f"    🔍 Found {len(links)} links on page")
-        
-        internal_links = []
-        for link in links:
-            href = link['href']
-            if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
-                full_url = urljoin(base_url, href)
-                
-                # Check if it's an internal link (same domain)
-                if self.is_same_domain(full_url, base_url) and full_url not in self.visited_urls:
-                    internal_links.append(full_url)
-        
-        # Download internal links (limit to prevent too many downloads)
-        for i, link_url in enumerate(internal_links[:5]):  # Limit to 5 links per page
-            if len(downloaded_content['pages']) >= self.max_pages:
-                print("    ⚠️ Reached maximum page limit")
-                break
-                
-            if link_url not in self.visited_urls:
-                print(f"    📄 [{i+1}/{len(internal_links[:5])}] Downloading linked page: {link_url}")
-                self.download_page_recursive(link_url, downloaded_content, depth + 1)
-
-    def is_same_domain(self, url1, url2):
-        """Check if two URLs are from the same domain"""
-        domain1 = urlparse(url1).netloc
-        domain2 = urlparse(url2).netloc
-        return domain1 == domain2
-
-    def download_page_recursive(self, url, downloaded_content, depth=0):
-        """Download a page and its linked pages recursively"""
-        if url in self.visited_urls or len(downloaded_content['pages']) >= self.max_pages:
-            return
-            
-        self.visited_urls.add(url)
-        
+    def load_page_file(self, filepath):
+        """Load a .page file into memory"""
         try:
-            print(f"    📄 Downloading page: {url}")
-            response = self.session.get(url, timeout=30)
-            if response.status_code == 200:
-                page_data = {
-                    'url': response.url,
-                    'content': response.text,
-                    'content_type': response.headers.get('content-type', 'text/html'),
-                    'status_code': 200,
-                    'downloaded_with': 'session',
-                    'depth': depth
+            with zipfile.ZipFile(filepath, 'r') as zipf:
+                # Read metadata
+                metadata_str = zipf.read('metadata.json').decode('utf-8')
+                metadata = json.loads(metadata_str)
+                
+                # Read all pages
+                pages = {}
+                for file_info in zipf.filelist:
+                    if file_info.filename.startswith('pages/') and file_info.filename.endswith('.json'):
+                        page_data_str = zipf.read(file_info.filename).decode('utf-8')
+                        page_data = json.loads(page_data_str)
+                        pages[page_data['url']] = page_data
+                
+                # Read assets
+                assets = {}
+                for file_info in zipf.filelist:
+                    if file_info.filename.startswith('assets/') and file_info.filename.endswith('.json'):
+                        asset_data_str = zipf.read(file_info.filename).decode('utf-8')
+                        asset_data = json.loads(asset_data_str)
+                        assets[asset_data['url']] = asset_data
+                
+                site_data = {
+                    'metadata': metadata,
+                    'pages': pages,
+                    'assets': assets
                 }
-                downloaded_content['pages'][url] = page_data
-                downloaded_content['pages'][response.url] = page_data
-                print(f"    ✅ Downloaded: {response.url}")
                 
-                # Download resources for this page
-                self.download_all_resources(response.text, response.url, downloaded_content)
+                domain = metadata['main_url']
+                self.loaded_sites[domain] = site_data
+                print(f"✅ Loaded site: {domain} with {len(pages)} pages and {len(assets)} assets")
+                return site_data
                 
-                # Discover and download linked pages
-                self.discover_and_download_links(response.text, response.url, downloaded_content, depth)
-                
-            else:
-                print(f"    ❌ Page {url}: {response.status_code}")
         except Exception as e:
-            print(f"    ❌ Error downloading {url}: {e}")
-
-    def download_with_session(self, url):
-        """Download using captured session"""
-        print("⬇️ Downloading with session...")
-        
-        downloaded_content = {
-            'main_url': url,
-            'pages': {},
-            'assets': {},
-            'timestamp': time.time(),
-        }
-        
-        # Start with main page
-        self.download_page_recursive(url, downloaded_content)
-        
-        # Also try to get additional resources from the live DOM
-        if self.driver:
-            try:
-                print("    🔍 Extracting resources from live DOM...")
-                page_source = self.driver.page_source
-                current_url = self.driver.current_url
-                self.download_all_resources(page_source, current_url, downloaded_content)
-                
-                # Also save the live DOM version
-                live_page_data = {
-                    'url': current_url,
-                    'content': page_source,
-                    'content_type': 'text/html',
-                    'status_code': 200,
-                    'downloaded_with': 'selenium_live_dom'
-                }
-                downloaded_content['pages'][f"{current_url}_live"] = live_page_data
-                
-                # Discover links from live DOM too
-                self.discover_and_download_links(page_source, current_url, downloaded_content)
-                
-            except Exception as e:
-                print(f"    ⚠️ Could not extract from live DOM: {e}")
-        
-        print(f"    📊 Total pages downloaded: {len(downloaded_content['pages'])}")
-        print(f"    📊 Total assets downloaded: {len(downloaded_content['assets'])}")
-        
-        # Save file
-        domain = urlparse(url).netloc.replace(':', '_')
-        filename = f"{domain}_{int(time.time())}.page"
-        filepath = os.path.join(self.output_dir, filename)
-        
-        if self.save_page_file(filepath, downloaded_content):
-            print(f"💾 Saved: {filename}")
-            return filepath
-        else:
-            print(f"❌ Failed to save: {filename}")
+            print(f"❌ Error loading {filepath}: {e}")
             return None
-
-    def download_all_resources(self, html, base_url, downloaded_content):
-        """Extract and download ALL resources from HTML"""
-        soup = BeautifulSoup(html, 'html.parser')
+    
+    def load_all_page_files(self):
+        """Load all .page files from the directory"""
+        if not os.path.exists(self.pages_directory):
+            print(f"❌ Directory {self.pages_directory} does not exist")
+            return
         
-        # Extended list of resource types to download
-        resource_patterns = [
-            # CSS files
-            ('link[rel="stylesheet"]', 'href'),
-            ('link[rel="preload"]', 'href'),
-            ('link[as="style"]', 'href'),
-            
-            # JavaScript files
-            ('script[src]', 'src'),
-            
-            # Images
-            ('img', 'src'),
-            ('img', 'srcset'),
-            ('picture source', 'srcset'),
-            ('link[rel="icon"]', 'href'),
-            ('link[rel="shortcut icon"]', 'href'),
-            ('link[rel="apple-touch-icon"]', 'href'),
-            ('meta[property="og:image"]', 'content'),
-            ('meta[name="twitter:image"]', 'content'),
-            
-            # Fonts
-            ('link[rel="preload"][as="font"]', 'href'),
-            ('link[href*=".woff"]', 'href'),
-            ('link[href*=".woff2"]', 'href'),
-            ('link[href*=".ttf"]', 'href'),
-            ('link[href*=".eot"]', 'href'),
-            
-            # Media
-            ('video', 'src'),
-            ('video source', 'src'),
-            ('audio', 'src'),
-            ('audio source', 'src'),
-            
-            # Frames and embeds
-            ('iframe', 'src'),
-            ('embed', 'src'),
-            ('object', 'data'),
-            
-            # Manifest and meta
-            ('link[rel="manifest"]', 'href'),
-            ('link[rel="canonical"]', 'href'),
-        ]
+        files = os.listdir(self.pages_directory)
+        page_files = [f for f in files if f.endswith('.page')]
         
-        all_resource_urls = set()
+        print(f"📄 Found {len(page_files)} .page files:")
+        for filename in page_files:
+            filepath = os.path.join(self.pages_directory, filename)
+            print(f"  • Loading: {filename}")
+            self.load_page_file(filepath)
         
-        # Extract from HTML tags
-        for selector, attr in resource_patterns:
-            for tag in soup.select(selector):
-                urls = []
-                if attr in tag.attrs:
-                    if attr == 'srcset':
-                        # Parse srcset (multiple images with descriptors)
-                        srcset = tag[attr]
-                        for source in srcset.split(','):
-                            url_part = source.strip().split(' ')[0]
-                            if url_part:
-                                urls.append(url_part)
-                    else:
-                        urls.append(tag[attr])
+        print(f"✅ Total sites loaded: {len(self.loaded_sites)}")
+    
+    def find_page_by_url(self, url):
+        """Find a page across all loaded sites by URL"""
+        # Exact match
+        for site_data in self.loaded_sites.values():
+            if url in site_data['pages']:
+                return site_data['pages'][url]
+        
+        # Try without protocol
+        if url.startswith('http://'):
+            alt_url = url.replace('http://', 'https://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['pages']:
+                    return site_data['pages'][alt_url]
+        elif url.startswith('https://'):
+            alt_url = url.replace('https://', 'http://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['pages']:
+                    return site_data['pages'][alt_url]
+        
+        # Try to find by path or domain
+        for site_data in self.loaded_sites.values():
+            for page_url, page_data in site_data['pages'].items():
+                # Match by exact path
+                parsed_request = urlparse(url)
+                parsed_page = urlparse(page_url)
                 
-                for url in urls:
-                    if url and not url.startswith(('data:', 'blob:', 'javascript:')):
-                        full_url = urljoin(base_url, url)
-                        all_resource_urls.add(full_url)
-        
-        # Extract URLs from inline CSS and JavaScript
-        inline_resources = self.extract_from_inline_content(soup, base_url)
-        all_resource_urls.update(inline_resources)
-        
-        # Extract from CSS @import and url() patterns in style tags
-        style_resources = self.extract_from_style_tags(soup, base_url)
-        all_resource_urls.update(style_resources)
-        
-        # Download all found resources
-        print(f"    📦 Found {len(all_resource_urls)} total resources")
-        
-        successful = 0
-        for i, resource_url in enumerate(all_resource_urls):
-            if resource_url in downloaded_content['assets']:
-                continue
+                if parsed_request.path and parsed_request.path == parsed_page.path:
+                    return page_data
                 
-            name = os.path.basename(resource_url) or resource_url[:50]
-            print(f"    [{i+1}/{len(all_resource_urls)}] Downloading: {name}")
-            
-            asset_data = self.download_resource(resource_url)
-            if asset_data:
-                downloaded_content['assets'][resource_url] = asset_data
-                successful += 1
-        
-        print(f"    ✅ Successfully downloaded: {successful}/{len(all_resource_urls)} assets")
-
-    def extract_from_inline_content(self, soup, base_url):
-        """Extract resource URLs from inline content (style attributes, script content)"""
-        resources = set()
-        
-        # Extract from style attributes
-        for tag in soup.find_all(style=True):
-            style_content = tag['style']
-            urls = re.findall(r'url\([\'"]?([^\)\'"]+)[\'"]?\)', style_content)
-            for url in urls:
-                if not url.startswith(('data:', 'blob:')):
-                    full_url = urljoin(base_url, url)
-                    resources.add(full_url)
-        
-        # Extract from script content
-        for script in soup.find_all('script'):
-            if script.string:
-                script_content = script.string
-                # Look for various URL patterns in JavaScript
-                patterns = [
-                    r'["\'](https?://[^"\']*\.(css|js|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot))["\']',
-                    r'url\(["\']?([^"\'\)]+)["\']?\)',
-                    r'src\s*=\s*["\']([^"\'\)]+)["\']',
-                    r'href\s*=\s*["\']([^"\'\)]+)["\']',
-                    r'["\'](/[^"\'\)]*\.(css|js|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot))["\']',
-                    r'["\'](\.\.[^"\'\)]*\.(css|js|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot))["\']',
-                    r'["\'](\./[^"\'\)]*\.(css|js|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot))["\']',
-                ]
-                for pattern in patterns:
-                    matches = re.findall(pattern, script_content)
-                    for match in matches:
-                        if isinstance(match, tuple):
-                            url = match[0]
-                        else:
-                            url = match
-                        if not url.startswith(('data:', 'blob:', 'javascript:')):
-                            full_url = urljoin(base_url, url)
-                            resources.add(full_url)
-        
-        return resources
-
-    def extract_from_style_tags(self, soup, base_url):
-        """Extract resources from style tag content"""
-        resources = set()
-        
-        for style_tag in soup.find_all('style'):
-            if style_tag.string:
-                css_content = style_tag.string
-                # Extract @import rules
-                imports = re.findall(r'@import\s+["\']([^"\'\)]+)["\']', css_content)
-                for import_url in imports:
-                    if not import_url.startswith(('data:', 'blob:')):
-                        full_url = urljoin(base_url, import_url)
-                        resources.add(full_url)
-                
-                # Extract url() references
-                urls = re.findall(r'url\([\'"]?([^\)\'"]+)[\'"]?\)', css_content)
-                for url in urls:
-                    if not url.startswith(('data:', 'blob:')):
-                        full_url = urljoin(base_url, url)
-                        resources.add(full_url)
-        
-        return resources
-
-    def download_resource(self, url):
-        """Download a resource with better error handling"""
-        try:
-            # Skip external CDNs that might block us
-            external_domains = ['googleapis.com', 'gstatic.com', 'cdn.prod.website-files.com', 'youtube.com', 'localizeapi.com']
-            if any(domain in url for domain in external_domains):
-                print(f"      ⏩ Skipping external CDN: {url}")
-                return None
-                
-            response = self.session.get(url, timeout=15, stream=True)
-            if response.status_code == 200:
-                content_type = response.headers.get('content-type', '').lower()
-                
-                # Handle different content types appropriately
-                if any(ct in content_type for ct in ['image', 'font', 'binary', 'video', 'audio', 'octet-stream']):
-                    content = response.content
-                    encoded = base64.b64encode(content).decode('utf-8')
-                    encoding = 'base64'
-                else:
-                    # For text files (CSS, JS, HTML)
-                    encoded = response.text
-                    encoding = 'text'
-                
-                return {
-                    'url': url,
-                    'content': encoded,
-                    'content_type': content_type,
-                    'encoding': encoding,
-                    'size': len(encoded),
-                    'filename': os.path.basename(urlparse(url).path) or 'resource'
-                }
-            else:
-                print(f"      ⚠️ HTTP {response.status_code} for {url}")
-        except requests.exceptions.Timeout:
-            print(f"      ⏰ Timeout for {url}")
-        except requests.exceptions.ConnectionError:
-            print(f"      🔌 Connection error for {url}")
-        except Exception as e:
-            print(f"      ❌ Error downloading {url}: {e}")
+                # Match domain and similar path
+                if (parsed_request.netloc == parsed_page.netloc and 
+                    parsed_request.path in parsed_page.path):
+                    return page_data
         
         return None
 
-    def save_page_file(self, filepath, content):
-        """Save as .page file"""
+    def find_asset_by_url(self, url):
+        """Find an asset across all loaded sites by URL"""
+        # Exact match
+        for site_data in self.loaded_sites.values():
+            if url in site_data['assets']:
+                return site_data['assets'][url]
+        
+        # Try without protocol
+        if url.startswith('http://'):
+            alt_url = url.replace('http://', 'https://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['assets']:
+                    return site_data['assets'][alt_url]
+        elif url.startswith('https://'):
+            alt_url = url.replace('https://', 'http://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['assets']:
+                    return site_data['assets'][alt_url]
+        
+        # Try by filename
+        requested_filename = os.path.basename(urlparse(url).path)
+        if requested_filename:
+            for site_data in self.loaded_sites.values():
+                for asset_url, asset_data in site_data['assets'].items():
+                    asset_filename = os.path.basename(urlparse(asset_url).path)
+                    if asset_filename == requested_filename:
+                        return asset_data
+        
+        return None
+
+class PageFileRequestHandler(SimpleHTTPRequestHandler):
+    page_browser = None
+    
+    def do_GET(self):
+        """Handle GET requests"""
         try:
-            with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Metadata
-                metadata = {
-                    'main_url': content['main_url'],
-                    'timestamp': content['timestamp'],
-                    'pages': len(content['pages']),
-                    'assets': len(content['assets']),
-                    'total_size': sum(len(asset['content']) for asset in content['assets'].values())
-                }
-                zipf.writestr('metadata.json', json.dumps(metadata, indent=2))
-                
-                # Pages
-                for url, data in content['pages'].items():
-                    hash_val = hashlib.md5(url.encode()).hexdigest()[:10]
-                    zipf.writestr(f"pages/{hash_val}.json", json.dumps(data, indent=2))
-                
-                # Assets - organized by type
-                css_count = js_count = image_count = font_count = other_count = 0
-                
-                for url, data in content['assets'].items():
-                    hash_val = hashlib.md5(url.encode()).hexdigest()[:10]
-                    filename = data.get('filename', 'resource')
-                    
-                    # Categorize assets
-                    content_type = data.get('content_type', '')
-                    if 'css' in content_type:
-                        folder = 'css'
-                        css_count += 1
-                    elif 'javascript' in content_type or 'application/javascript' in content_type:
-                        folder = 'js'
-                        js_count += 1
-                    elif 'image' in content_type:
-                        folder = 'images'
-                        image_count += 1
-                    elif 'font' in content_type:
-                        folder = 'fonts'
-                        font_count += 1
-                    else:
-                        folder = 'other'
-                        other_count += 1
-                    
-                    zipf.writestr(f"assets/{folder}/{hash_val}_{filename}", json.dumps(data, indent=2))
-                
-                # Add asset summary
-                asset_summary = {
-                    'css_files': css_count,
-                    'js_files': js_count,
-                    'images': image_count,
-                    'fonts': font_count,
-                    'other_assets': other_count
-                }
-                zipf.writestr('asset_summary.json', json.dumps(asset_summary, indent=2))
+            # Parse the requested path
+            path = unquote(self.path)
             
-            file_size = os.path.getsize(filepath) / (1024 * 1024)  # Size in MB
-            print(f"    💾 File size: {file_size:.2f} MB")
-            return os.path.exists(filepath)
+            # Remove query parameters
+            if '?' in path:
+                path = path.split('?')[0]
+            
+            print(f"🔍 Requested path: {path}")
+            
+            # Handle root - show index of loaded sites
+            if path == '/' or path == '/index.html':
+                self.serve_index()
+                return
+            
+            # Handle asset requests
+            if path.startswith('/asset/'):
+                self.serve_asset(path)
+                return
+            
+            # Handle requests for specific pages
+            if path.startswith('/page/'):
+                self.serve_saved_page(path)
+                return
+            
+            # Default to trying to find a matching page
+            self.serve_saved_page(f'/page{path}')
+            
         except Exception as e:
-            print(f"    ❌ Save error: {e}")
-            return False
-
-    def download_website(self, url):
-        """Main download method"""
-        print(f"⬇️ Target: {url}")
+            self.send_error(500, f"Server error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    def serve_index(self):
+        """Serve an index page listing all loaded sites"""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
         
-        # Reset visited URLs for this download
-        self.visited_urls = set()
-        
-        # Manual Cloudflare solve
-        if not self.manual_cloudflare_solve(url):
-            print("❌ Failed to setup Chrome session")
-            return None
-        
-        # Download with session
-        result = self.download_with_session(url)
-        
-        # Cleanup
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
-        
-        return result
-
-    def download_from_list(self, url_list):
-        """Download multiple sites"""
-        downloaded_files = []
-        
-        print(f"🎯 Downloading {len(url_list)} sites...")
-        print(f"📁 Output: {self.output_dir}")
-        
-        for i, url in enumerate(url_list, 1):
-            url = url.strip()
-            if not url:
-                continue
+        html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>🌐 Offline Website Browser</title>
+            <style>
+                * {
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }
                 
-            print(f"\n{'='*50}")
-            print(f"#{i}: {url}")
-            print("="*50)
-            
-            try:
-                filepath = self.download_website(url)
-                if filepath:
-                    downloaded_files.append(filepath)
-                    print(f"✅ Success!")
-                else:
-                    print(f"❌ Failed")
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                }
+                
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                }
+                
+                .header {
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(10px);
+                    padding: 40px;
+                    border-radius: 20px;
+                    margin-bottom: 30px;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                    text-align: center;
+                }
+                
+                .header h1 {
+                    font-size: 3em;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    margin-bottom: 10px;
+                }
+                
+                .header p {
+                    color: #666;
+                    font-size: 1.2em;
+                }
+                
+                .sites-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+                    gap: 25px;
+                }
+                
+                .site-card {
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(10px);
+                    padding: 30px;
+                    border-radius: 15px;
+                    box-shadow: 0 15px 35px rgba(0,0,0,0.1);
+                    transition: transform 0.3s ease, box-shadow 0.3s ease;
+                }
+                
+                .site-card:hover {
+                    transform: translateY(-5px);
+                    box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+                }
+                
+                .site-card h2 {
+                    margin-bottom: 15px;
+                }
+                
+                .site-card h2 a {
+                    color: #333;
+                    text-decoration: none;
+                    font-size: 1.4em;
+                    transition: color 0.3s ease;
+                }
+                
+                .site-card h2 a:hover {
+                    color: #667eea;
+                }
+                
+                .stats {
+                    display: flex;
+                    gap: 15px;
+                    margin-bottom: 20px;
+                    flex-wrap: wrap;
+                }
+                
+                .stat {
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    color: white;
+                    padding: 8px 15px;
+                    border-radius: 20px;
+                    font-size: 0.9em;
+                    font-weight: 500;
+                }
+                
+                .pages-list {
+                    max-height: 200px;
+                    overflow-y: auto;
+                    margin-top: 15px;
+                }
+                
+                .pages-list ul {
+                    list-style: none;
+                }
+                
+                .pages-list li {
+                    margin-bottom: 8px;
+                    padding: 8px 12px;
+                    background: #f8f9fa;
+                    border-radius: 8px;
+                    transition: background 0.3s ease;
+                }
+                
+                .pages-list li:hover {
+                    background: #e9ecef;
+                }
+                
+                .pages-list a {
+                    color: #495057;
+                    text-decoration: none;
+                    display: block;
+                }
+                
+                .pages-list a:hover {
+                    color: #667eea;
+                }
+                
+                .empty-state {
+                    text-align: center;
+                    padding: 60px 20px;
+                    color: #666;
+                }
+                
+                .empty-state h2 {
+                    margin-bottom: 15px;
+                    color: #333;
+                }
+                
+                /* Custom scrollbar */
+                .pages-list::-webkit-scrollbar {
+                    width: 6px;
+                }
+                
+                .pages-list::-webkit-scrollbar-track {
+                    background: #f1f1f1;
+                    border-radius: 3px;
+                }
+                
+                .pages-list::-webkit-scrollbar-thumb {
+                    background: #667eea;
+                    border-radius: 3px;
+                }
+                
+                .pages-list::-webkit-scrollbar-thumb:hover {
+                    background: #764ba2;
+                }
+                
+                @media (max-width: 768px) {
+                    .sites-grid {
+                        grid-template-columns: 1fr;
+                    }
                     
-            except Exception as e:
-                print(f"❌ Error: {e}")
-        
-        print(f"\n{'='*50}")
-        print(f"📊 Complete: {len(downloaded_files)}/{len(url_list)} sites")
-        print(f"💾 Location: {self.output_dir}")
-        
-        return downloaded_files
-
-if __name__ == "__main__":
-    print("="*50)
-    print("🚀 FIXED WEBSITE DOWNLOADER - DOWNLOADS CSS/JS/IMAGES")
-    print("📥 Now actually downloads assets, not just pages!")
-    print("🌐 Works with any website")
-    print("="*50)
-    
-    # You can add any websites here
-    sites = [
-        "https://discord.com",
-        # Add more sites as needed
-    ]
-    
-    # Or get sites from user input
-    if len(sys.argv) > 1:
-        sites = sys.argv[1:]
-    else:
-        user_input = input("Enter websites to download (comma-separated, or press Enter for default): ").strip()
-        if user_input:
-            sites = [site.strip() for site in user_input.split(',')]
-    
-    downloader = AdvancedWebsiteDownloader()
-    files = downloader.download_from_list(sites)
-    
-    if files:
-        print(f"\n🎉 Success! Downloaded {len(files)} sites with pages AND assets")
-        print("💡 Now run the browser.py to view your downloaded sites with proper styling!")
-    else:
-        print(f"\n❌ No sites downloaded")
+                    .header {
+                        padding: 30px 20px;
+                    }
+                    
+                    .header h1 {
+                        font-size: 2.2em;
+                    }
+                }
+            </style>
+        </head
