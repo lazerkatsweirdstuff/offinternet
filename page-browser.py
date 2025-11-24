@@ -375,4 +375,325 @@ class PageFileRequestHandler(SimpleHTTPRequestHandler):
                     }
                 }
             </style>
-        </head
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🌐 Offline Website Browser</h1>
+                    <p>Browse your downloaded websites offline</p>
+                </div>
+        """
+        
+        if not self.page_browser.loaded_sites:
+            html += """
+                <div class="empty-state">
+                    <h2>No websites loaded</h2>
+                    <p>No .page files found in the downloaded_sites directory.</p>
+                    <p>Run the downloader first to download some websites!</p>
+                </div>
+            """
+        else:
+            html += '<div class="sites-grid">'
+            
+            for domain, site_data in self.page_browser.loaded_sites.items():
+                metadata = site_data['metadata']
+                pages = list(site_data['pages'].keys())
+                
+                html += f"""
+                <div class="site-card">
+                    <h2><a href="/page/{domain}">{domain}</a></h2>
+                    <div class="stats">
+                        <span class="stat">📄 {len(site_data['pages'])} pages</span>
+                        <span class="stat">🎨 {len(site_data['assets'])} assets</span>
+                        <span class="stat">💾 {metadata.get('total_size', 0) // 1024} KB</span>
+                    </div>
+                    <div class="pages-list">
+                        <strong>Available Pages:</strong>
+                        <ul>
+                """
+                
+                # Show main pages
+                for page_url in pages[:8]:  # Show first 8 pages
+                    page_name = urlparse(page_url).path or '/'
+                    if len(page_name) > 40:
+                        page_name = page_name[:37] + '...'
+                    html += f'<li><a href="/page/{page_url}">{page_name}</a></li>'
+                
+                if len(pages) > 8:
+                    html += f'<li>... and {len(pages) - 8} more pages</li>'
+                
+                html += """
+                        </ul>
+                    </div>
+                </div>
+                """
+            
+            html += '</div>'
+        
+        html += """
+            </div>
+        </body>
+        </html>
+        """
+        
+        self.wfile.write(html.encode('utf-8'))
+    
+    def serve_saved_page(self, path):
+        """Serve a page from the loaded .page files"""
+        # Extract the requested URL from the path
+        requested_url = path[6:]  # Remove '/page/' prefix
+        
+        if not requested_url:
+            self.send_error(404, "Page not found")
+            return
+        
+        print(f"🔍 Looking for page: {requested_url}")
+        
+        # Find the page in loaded sites
+        page_data = self.page_browser.find_page_by_url(requested_url)
+        
+        if page_data:
+            content = page_data['content']
+            
+            # Fix links in the content to work with our offline browser
+            content = self.rewrite_links(content, page_data['url'])
+            
+            self.send_response(200)
+            self.send_header('Content-type', page_data.get('content_type', 'text/html'))
+            self.end_headers()
+            self.wfile.write(content.encode('utf-8'))
+            print(f"✅ Served page: {requested_url}")
+        else:
+            print(f"❌ Page not found: {requested_url}")
+            # Try to serve a nice 404 page
+            self.serve_404(requested_url)
+    
+    def serve_404(self, requested_url):
+        """Serve a nice 404 page"""
+        self.send_response(404)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Page Not Found</title>
+            <style>
+                body {{ 
+                    font-family: Arial, sans-serif; 
+                    margin: 40px; 
+                    background: #f5f5f5;
+                    text-align: center;
+                }}
+                .error-container {{
+                    background: white;
+                    padding: 40px;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }}
+                h1 {{ color: #e74c3c; }}
+                a {{ color: #3498db; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <div class="error-container">
+                <h1>❌ Page Not Found</h1>
+                <p>The page <strong>{requested_url}</strong> was not found in your downloaded sites.</p>
+                <p><a href="/">← Back to Home</a></p>
+            </div>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode('utf-8'))
+    
+    def serve_asset(self, path):
+        """Serve asset files (CSS, JS, images, etc.)"""
+        try:
+            # Extract asset URL from path: /asset/ENCODED_URL
+            encoded_url = path[7:]  # Remove '/asset/' prefix
+            
+            if not encoded_url:
+                self.send_error(404, "Asset URL not specified")
+                return
+            
+            # URL decode the asset URL
+            asset_url = unquote(encoded_url)
+            
+            print(f"🔍 Looking for asset: {asset_url}")
+            
+            # Find asset in loaded sites
+            asset_data = self.page_browser.find_asset_by_url(asset_url)
+            
+            if not asset_data:
+                print(f"❌ Asset not found: {asset_url}")
+                self.send_error(404, f"Asset not found: {asset_url}")
+                return
+            
+            # Determine content type
+            content_type = asset_data.get('content_type', 'application/octet-stream')
+            encoding = asset_data.get('encoding', 'text')
+            content = asset_data['content']
+            
+            self.send_response(200)
+            self.send_header('Content-type', content_type)
+            self.send_header('Cache-Control', 'public, max-age=3600')  # Cache for 1 hour
+            
+            if encoding == 'base64':
+                # Decode base64 content
+                binary_content = base64.b64decode(content)
+                self.send_header('Content-Length', str(len(binary_content)))
+                self.end_headers()
+                self.wfile.write(binary_content)
+            else:
+                # Text content
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            
+            print(f"✅ Served asset: {asset_url} ({len(content)} bytes)")
+            
+        except Exception as e:
+            print(f"❌ Error serving asset: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_error(500, f"Asset serving error: {str(e)}")
+    
+    def rewrite_links(self, html, base_url):
+        """Rewrite links in HTML to work with offline browser"""
+        soup = BeautifulSoup(html, 'html.parser')
+        base_domain = urlparse(base_url).netloc
+        
+        # Rewrite <a> tags
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if href.startswith(('http://', 'https://')):
+                # External link - keep as is or make it open in offline browser
+                if base_domain in href:
+                    # Convert to our internal routing
+                    link['href'] = f"/page/{href}"
+                # Otherwise leave external links as-is
+            elif href.startswith('/'):
+                # Absolute path - convert to full URL then to our routing
+                full_url = f"{urlparse(base_url).scheme}://{base_domain}{href}"
+                link['href'] = f"/page/{full_url}"
+            elif href.startswith('#') or href.startswith('javascript:'):
+                # Anchors and JS links - leave as is
+                pass
+            elif not href.startswith(('mailto:', 'tel:')):
+                # Relative path
+                full_url = urljoin(base_url, href)
+                link['href'] = f"/page/{full_url}"
+        
+        # Rewrite resource links to use our asset server
+        self.rewrite_resource_links(soup, base_url)
+        
+        return str(soup)
+    
+    def rewrite_resource_links(self, soup, base_url):
+        """Rewrite resource links (CSS, JS, images) to use asset server"""
+        # Rewrite <script> tags
+        for script in soup.find_all('script', src=True):
+            src = script['src']
+            if src and not src.startswith(('data:', 'blob:')):
+                if src.startswith(('http://', 'https://')):
+                    script['src'] = f"/asset/{src}"
+                else:
+                    full_src = urljoin(base_url, src)
+                    script['src'] = f"/asset/{full_src}"
+        
+        # Rewrite <link> tags (CSS, etc.)
+        for link in soup.find_all('link', href=True):
+            href = link['href']
+            if href and not href.startswith(('data:', 'blob:')):
+                if href.startswith(('http://', 'https://')):
+                    link['href'] = f"/asset/{href}"
+                else:
+                    full_href = urljoin(base_url, href)
+                    link['href'] = f"/asset/{full_href}"
+        
+        # Rewrite <img> tags
+        for img in soup.find_all('img', src=True):
+            src = img['src']
+            if src and not src.startswith(('data:', 'blob:')):
+                if src.startswith(('http://', 'https://')):
+                    img['src'] = f"/asset/{src}"
+                else:
+                    full_src = urljoin(base_url, src)
+                    img['src'] = f"/asset/{full_src}"
+        
+        # Rewrite CSS url() references in style tags
+        for style in soup.find_all('style'):
+            if style.string:
+                style.string = re.sub(
+                    r'url\([\'"]?([^)\'"]+)[\'"]?\)',
+                    lambda m: self.rewrite_css_url(m.group(1), base_url),
+                    style.string
+                )
+        
+        # Rewrite CSS in style attributes
+        for tag in soup.find_all(style=True):
+            if tag['style']:
+                tag['style'] = re.sub(
+                    r'url\([\'"]?([^)\'"]+)[\'"]?\)',
+                    lambda m: self.rewrite_css_url(m.group(1), base_url),
+                    tag['style']
+                )
+    
+    def rewrite_css_url(self, url, base_url):
+        """Rewrite a CSS URL to use asset server"""
+        if url.startswith(('data:', 'blob:')):
+            return f'url({url})'
+        
+        if url.startswith(('http://', 'https://')):
+            return f'url(/asset/{url})'
+        else:
+            full_url = urljoin(base_url, url)
+            return f'url(/asset/{full_url})'
+
+def start_browser(pages_directory=None, port=8000):
+    """Start the web browser server"""
+    script_dir = get_script_directory()
+    if pages_directory is None:
+        pages_directory = os.path.join(script_dir, "downloaded_sites")
+    else:
+        pages_directory = os.path.abspath(pages_directory)
+    
+    print(f"🔍 Looking for .page files in: {pages_directory}")
+    
+    # Create and configure the browser
+    browser = PageFileBrowser(pages_directory)
+    browser.load_all_page_files()
+    
+    if not browser.loaded_sites:
+        print("❌ No .page files loaded. Cannot start browser.")
+        print("💡 Make sure you run downloader.py first to download some websites!")
+        print("💡 Check that the downloaded_sites folder exists and contains .page files")
+        return
+    
+    # Set up the request handler
+    from http.server import HTTPServer
+    PageFileRequestHandler.page_browser = browser
+    
+    # Change to script directory to avoid serving system files
+    os.chdir(script_dir)
+    
+    # Start the server
+    server = HTTPServer(('localhost', port), PageFileRequestHandler)
+    
+    print(f"🌐 Starting offline browser on http://localhost:{port}")
+    print("🎨 Beautiful UI with working links!")
+    print("📂 Serving from your downloaded sites")
+    print("🛑 Press Ctrl+C to stop the server")
+    
+    # Open browser automatically
+    webbrowser.open(f'http://localhost:{port}')
+    
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down server...")
+        server.shutdown()
+
+if __name__ == "__main__":
+    start_browser()
