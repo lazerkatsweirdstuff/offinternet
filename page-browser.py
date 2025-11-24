@@ -6,6 +6,7 @@ import webbrowser
 from urllib.parse import urlparse, unquote
 import tempfile
 import base64
+import hashlib
 
 def get_script_directory():
     """Get the directory where the script is located"""
@@ -109,15 +110,16 @@ class PageFileBrowser:
         # Try to find by path or domain
         for site_data in self.loaded_sites.values():
             for page_url, page_data in site_data['pages'].items():
-                # Match by path
-                if url in page_url:
+                # Match by exact path
+                parsed_request = urlparse(url)
+                parsed_page = urlparse(page_url)
+                
+                if parsed_request.path and parsed_request.path == parsed_page.path:
                     return page_data
-                # Match by filename
-                if url.endswith('/'):
-                    if page_url.startswith(url):
-                        return page_data
-                # Match domain only
-                if urlparse(url).netloc and urlparse(url).netloc == urlparse(page_url).netloc:
+                
+                # Match domain and similar path
+                if (parsed_request.netloc == parsed_page.netloc and 
+                    parsed_request.path in parsed_page.path):
                     return page_data
         
         return None
@@ -140,6 +142,15 @@ class PageFileBrowser:
             for site_data in self.loaded_sites.values():
                 if alt_url in site_data['assets']:
                     return site_data['assets'][alt_url]
+        
+        # Try by filename
+        requested_filename = os.path.basename(urlparse(url).path)
+        if requested_filename:
+            for site_data in self.loaded_sites.values():
+                for asset_url, asset_data in site_data['assets'].items():
+                    asset_filename = os.path.basename(urlparse(asset_url).path)
+                    if asset_filename == requested_filename:
+                        return asset_data
         
         return None
 
@@ -188,250 +199,201 @@ class PageFileRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         
         html = """
-        <html>
+        <!DOCTYPE html>
+        <html lang="en">
         <head>
-            <title>Offline Website Browser</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>🌐 Offline Website Browser</title>
             <style>
-                body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-                .header { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                .site { background: white; padding: 20px; margin: 10px 0; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-                .pages { margin-left: 20px; margin-top: 10px; }
-                a { color: #0066cc; text-decoration: none; }
-                a:hover { text-decoration: underline; }
-                .stats { color: #666; font-size: 14px; margin-top: 5px; }
+                * {
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }
+                
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                }
+                
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                }
+                
+                .header {
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(10px);
+                    padding: 40px;
+                    border-radius: 20px;
+                    margin-bottom: 30px;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                    text-align: center;
+                }
+                
+                .header h1 {
+                    font-size: 3em;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    margin-bottom: 10px;
+                }
+                
+                .header p {
+                    color: #666;
+                    font-size: 1.2em;
+                }
+                
+                .sites-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+                    gap: 25px;
+                }
+                
+                .site-card {
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(10px);
+                    padding: 30px;
+                    border-radius: 15px;
+                    box-shadow: 0 15px 35px rgba(0,0,0,0.1);
+                    transition: transform 0.3s ease, box-shadow 0.3s ease;
+                }
+                
+                .site-card:hover {
+                    transform: translateY(-5px);
+                    box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+                }
+                
+                .site-card h2 {
+                    margin-bottom: 15px;
+                }
+                
+                .site-card h2 a {
+                    color: #333;
+                    text-decoration: none;
+                    font-size: 1.4em;
+                    transition: color 0.3s ease;
+                }
+                
+                .site-card h2 a:hover {
+                    color: #667eea;
+                }
+                
+                .stats {
+                    display: flex;
+                    gap: 15px;
+                    margin-bottom: 20px;
+                    flex-wrap: wrap;
+                }
+                
+                .stat {
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    color: white;
+                    padding: 8px 15px;
+                    border-radius: 20px;
+                    font-size: 0.9em;
+                    font-weight: 500;
+                }
+                
+                .pages-list {
+                    max-height: 200px;
+                    overflow-y: auto;
+                    margin-top: 15px;
+                }
+                
+                .pages-list ul {
+                    list-style: none;
+                }
+                
+                .pages-list li {
+                    margin-bottom: 8px;
+                    padding: 8px 12px;
+                    background: #f8f9fa;
+                    border-radius: 8px;
+                    transition: background 0.3s ease;
+                }
+                
+                .pages-list li:hover {
+                    background: #e9ecef;
+                }
+                
+                .pages-list a {
+                    color: #495057;
+                    text-decoration: none;
+                    display: block;
+                }
+                
+                .pages-list a:hover {
+                    color: #667eea;
+                }
+                
+                .empty-state {
+                    text-align: center;
+                    padding: 60px 20px;
+                    color: #666;
+                }
+                
+                .empty-state h2 {
+                    margin-bottom: 15px;
+                    color: #333;
+                }
+                
+                /* Custom scrollbar */
+                .pages-list::-webkit-scrollbar {
+                    width: 6px;
+                }
+                
+                .pages-list::-webkit-scrollbar-track {
+                    background: #f1f1f1;
+                    border-radius: 3px;
+                }
+                
+                .pages-list::-webkit-scrollbar-thumb {
+                    background: #667eea;
+                    border-radius: 3px;
+                }
+                
+                .pages-list::-webkit-scrollbar-thumb:hover {
+                    background: #764ba2;
+                }
+                
+                @media (max-width: 768px) {
+                    .sites-grid {
+                        grid-template-columns: 1fr;
+                    }
+                    
+                    .header {
+                        padding: 30px 20px;
+                    }
+                    
+                    .header h1 {
+                        font-size: 2.2em;
+                    }
+                }
             </style>
         </head>
         <body>
-            <div class="header">
-                <h1>🌐 Offline Website Browser</h1>
-                <p>Loaded websites from your downloaded_sites folder:</p>
-            </div>
+            <div class="container">
+                <div class="header">
+                    <h1>🌐 Offline Website Browser</h1>
+                    <p>Browse your downloaded websites offline</p>
+                </div>
         """
         
         if not self.page_browser.loaded_sites:
             html += """
-            <div class="site">
-                <h2>No sites loaded</h2>
-                <p>No .page files found in the downloaded_sites directory.</p>
-                <p>Run the downloader first to download some websites!</p>
-            </div>
+                <div class="empty-state">
+                    <h2>No websites loaded</h2>
+                    <p>No .page files found in the downloaded_sites directory.</p>
+                    <p>Run the downloader first to download some websites!</p>
+                </div>
             """
         else:
+            html += '<div class="sites-grid">'
+            
             for domain, site_data in self.page_browser.loaded_sites.items():
                 metadata = site_data['metadata']
-                
-                html += f"""
-                <div class="site">
-                    <h2><a href="/page/{domain}">{domain}</a></h2>
-                    <div class="stats">
-                        📄 {len(site_data['pages'])} pages • 
-                        🎨 {len(site_data['assets'])} assets •
-                        💾 {metadata.get('total_size', 0) // 1024} KB
-                    </div>
-                    <div class="pages">
-                        <strong>Main Pages:</strong>
-                        <ul>
-                """
-                
-                # Show main pages (not all pages to avoid clutter)
-                main_pages = list(site_data['pages'].keys())[:5]
-                for page_url in main_pages:
-                    page_name = urlparse(page_url).path or '/'
-                    if len(page_name) > 50:
-                        page_name = page_name[:47] + '...'
-                    html += f'<li><a href="/page/{page_url}">{page_name}</a></li>'
-                
-                if len(site_data['pages']) > 5:
-                    html += f'<li>... and {len(site_data["pages"]) - 5} more pages</li>'
-                
-                html += """
-                        </ul>
-                    </div>
-                </div>
-                """
-        
-        html += "</body></html>"
-        
-        self.wfile.write(html.encode('utf-8'))
-    
-    def serve_saved_page(self, path):
-        """Serve a page from the loaded .page files"""
-        # Extract the requested URL from the path
-        requested_url = path[6:]  # Remove '/page/' prefix
-        
-        if not requested_url:
-            self.send_error(404, "Page not found")
-            return
-        
-        print(f"🔍 Looking for page: {requested_url}")
-        
-        # Find the page in loaded sites
-        page_data = self.page_browser.find_page_by_url(requested_url)
-        
-        if page_data:
-            content = page_data['content']
-            
-            # Fix links in the content to work with our offline browser
-            content = self.rewrite_links(content, page_data['url'])
-            
-            self.send_response(200)
-            self.send_header('Content-type', page_data.get('content_type', 'text/html'))
-            self.end_headers()
-            self.wfile.write(content.encode('utf-8'))
-            print(f"✅ Served page: {requested_url}")
-        else:
-            print(f"❌ Page not found: {requested_url}")
-            self.send_error(404, f"Page not found: {requested_url}")
-    
-    def serve_asset(self, path):
-        """Serve asset files (CSS, JS, images, etc.)"""
-        try:
-            # Extract asset URL from path: /asset/ENCODED_URL
-            encoded_url = path[7:]  # Remove '/asset/' prefix
-            
-            if not encoded_url:
-                self.send_error(404, "Asset URL not specified")
-                return
-            
-            # URL decode the asset URL
-            asset_url = unquote(encoded_url)
-            
-            print(f"🔍 Looking for asset: {asset_url}")
-            
-            # Find asset in loaded sites
-            asset_data = self.page_browser.find_asset_by_url(asset_url)
-            
-            if not asset_data:
-                print(f"❌ Asset not found: {asset_url}")
-                self.send_error(404, f"Asset not found: {asset_url}")
-                return
-            
-            # Determine content type
-            content_type = asset_data.get('content_type', 'application/octet-stream')
-            encoding = asset_data.get('encoding', 'text')
-            content = asset_data['content']
-            
-            self.send_response(200)
-            self.send_header('Content-type', content_type)
-            
-            if encoding == 'base64':
-                # Decode base64 content
-                binary_content = base64.b64decode(content)
-                self.send_header('Content-Length', str(len(binary_content)))
-                self.end_headers()
-                self.wfile.write(binary_content)
-            else:
-                # Text content
-                self.send_header('Content-Length', str(len(content)))
-                self.end_headers()
-                self.wfile.write(content.encode('utf-8'))
-            
-            print(f"✅ Served asset: {asset_url} ({len(content)} bytes)")
-            
-        except Exception as e:
-            print(f"❌ Error serving asset: {e}")
-            import traceback
-            traceback.print_exc()
-            self.send_error(500, f"Asset serving error: {str(e)}")
-    
-    def rewrite_links(self, html, base_url):
-        """Rewrite links in HTML to work with offline browser"""
-        from bs4 import BeautifulSoup
-        import re
-        
-        soup = BeautifulSoup(html, 'html.parser')
-        base_domain = urlparse(base_url).netloc
-        
-        # Rewrite <a> tags
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            if href.startswith(('http://', 'https://')):
-                # External link - keep as is or make it open in offline browser
-                if base_domain in href:
-                    link['href'] = f"/page/{href}"
-                # Otherwise leave external links as-is
-            elif href.startswith('/'):
-                # Absolute path
-                link['href'] = f"/page/{urlparse(base_url).scheme}://{base_domain}{href}"
-            elif href.startswith('#') or href.startswith('javascript:'):
-                # Anchors and JS links - leave as is
-                pass
-            else:
-                # Relative path
-                link['href'] = f"/page/{urljoin(base_url, href)}"
-        
-        # Rewrite <script> tags
-        for script in soup.find_all('script', src=True):
-            src = script['src']
-            if src and not src.startswith(('data:', 'blob:')):
-                script['src'] = f"/asset/{src}"
-        
-        # Rewrite <link> tags (CSS, etc.)
-        for link in soup.find_all('link', href=True):
-            href = link['href']
-            if href and not href.startswith(('data:', 'blob:')):
-                link['href'] = f"/asset/{href}"
-        
-        # Rewrite <img> tags
-        for img in soup.find_all('img', src=True):
-            src = img['src']
-            if src and not src.startswith(('data:', 'blob:')):
-                img['src'] = f"/asset/{src}"
-        
-        # Rewrite CSS url() references
-        style_tags = soup.find_all('style')
-        for style in style_tags:
-            if style.string:
-                style.string = re.sub(
-                    r'url\(([^)]+)\)',
-                    lambda m: f"url(/asset/{m.group(1)})",
-                    style.string
-                )
-        
-        return str(soup)
-
-def start_browser(pages_directory=None, port=8000):
-    """Start the web browser server"""
-    script_dir = get_script_directory()
-    if pages_directory is None:
-        pages_directory = os.path.join(script_dir, "downloaded_sites")
-    else:
-        pages_directory = os.path.abspath(pages_directory)
-    
-    print(f"🔍 Looking for .page files in: {pages_directory}")
-    
-    # Create and configure the browser
-    browser = PageFileBrowser(pages_directory)
-    browser.load_all_page_files()
-    
-    if not browser.loaded_sites:
-        print("❌ No .page files loaded. Cannot start browser.")
-        print("💡 Make sure you run downloader.py first to download some websites!")
-        print("💡 Check that the downloaded_sites folder exists and contains .page files")
-        return
-    
-    # Set up the request handler
-    from http.server import HTTPServer
-    PageFileRequestHandler.page_browser = browser
-    
-    # Change to script directory to avoid serving system files
-    os.chdir(script_dir)
-    
-    # Start the server
-    server = HTTPServer(('localhost', port), PageFileRequestHandler)
-    
-    print(f"🌐 Starting offline browser on http://localhost:{port}")
-    print("📂 Serving from your downloaded sites, not system files!")
-    print("🛑 Press Ctrl+C to stop the server")
-    
-    # Open browser automatically
-    webbrowser.open(f'http://localhost:{port}')
-    
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n👋 Shutting down server...")
-        server.shutdown()
-
-if __name__ == "__main__":
-    start_browser()
+                pages = list(site_data['pages'].
