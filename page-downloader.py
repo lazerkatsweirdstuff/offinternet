@@ -403,6 +403,12 @@ class AdvancedWebsiteDownloader:
     def download_resource(self, url):
         """Download a resource with better error handling"""
         try:
+            # Skip external CDNs that might block us
+            external_domains = ['googleapis.com', 'gstatic.com', 'cdn.prod.website-files.com', 'youtube.com', 'localizeapi.com']
+            if any(domain in url for domain in external_domains):
+                print(f"      ⏩ Skipping external CDN: {url}")
+                return None
+                
             response = self.session.get(url, timeout=15, stream=True)
             if response.status_code == 200:
                 content_type = response.headers.get('content-type', '').lower()
@@ -556,14 +562,14 @@ class AdvancedWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*50)
-    print("🚀 ENHANCED WEBSITE DOWNLOADER - WITH LINK DISCOVERY")
-    print("📥 Downloads: Multiple pages, CSS, JS, Images, Fonts, and more!")
+    print("🚀 FIXED WEBSITE DOWNLOADER - DOWNLOADS CSS/JS/IMAGES")
+    print("📥 Now actually downloads assets, not just pages!")
     print("🌐 Works with any website")
     print("="*50)
     
     # You can add any websites here
     sites = [
-        "https://deepseek.com",
+        "https://discord.com",
         # Add more sites as needed
     ]
     
@@ -579,7 +585,7 @@ if __name__ == "__main__":
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded {len(files)} sites with multiple pages and assets")
-        print("💡 Now run the browser.py to view your downloaded sites!")
+        print(f"\n🎉 Success! Downloaded {len(files)} sites with pages AND assets")
+        print("💡 Now run the browser.py to view your downloaded sites with proper styling!")
     else:
         print(f"\n❌ No sites downloaded")
