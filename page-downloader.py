@@ -36,7 +36,7 @@ class CompleteWebsiteDownloader:
         self.visited_urls = set()
         self.pages_to_crawl = deque()
         self.failed_urls = set()
-        self.max_pages = 10
+        self.max_pages = 200
         self.crawl_delay = random.uniform(1, 2)
         self.max_retries = 2
         
@@ -119,6 +119,139 @@ class CompleteWebsiteDownloader:
         except Exception as e:
             print(f"❌ Error during manual solve: {e}")
             return False
+
+    def extract_all_links_complete(self, html, base_url):
+        """Extract ALL links for comprehensive crawling"""
+        soup = BeautifulSoup(html, 'html.parser')
+        links = set()
+        base_domain = urlparse(base_url).netloc
+        
+        # Get all anchor tags
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                full_url = urljoin(base_url, href)
+                
+                # Clean URL
+                clean_url = self.clean_url(full_url)
+                
+                # Basic validation
+                if (clean_url.startswith(('http://', 'https://')) and 
+                    base_domain in clean_url and
+                    not self.is_likely_junk(clean_url)):
+                    links.add(clean_url)
+        
+        return links
+
+    def is_likely_junk(self, url):
+        """Filter out obviously junk URLs"""
+        junk_patterns = [
+            '/cdn-cgi/', '/wp-admin/', '/wp-json/', '/administrator/', 
+            '.pdf', '.zip', '.exe', '.dmg',
+            '/api/', '/ajax/', '/graphql', '/websocket'
+        ]
+        url_lower = url.lower()
+        return any(pattern in url_lower for pattern in junk_patterns)
+
+    def clean_url(self, url):
+        """Clean URL but keep important parameters"""
+        try:
+            parsed = urlparse(url)
+            # Remove fragment only
+            cleaned = parsed._replace(fragment='')
+            return cleaned.geturl()
+        except Exception:
+            return url
+
+    def download_with_retry_complete(self, url, retry_count=0):
+        """Download with complete retry logic"""
+        if retry_count >= self.max_retries:
+            self.failed_urls.add(url)
+            return None
+        
+        try:
+            time.sleep(random.uniform(0.5, 1.5))
+            
+            if random.random() < 0.2:
+                self.update_session_headers()
+            
+            response = self.session.get(url, timeout=15, allow_redirects=True)
+            
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 403:
+                print(f"    🚫 403 Forbidden: {url}")
+                time.sleep(5)
+                return self.download_with_retry_complete(url, retry_count + 1)
+            elif response.status_code == 429:
+                print(f"    🐢 429 Rate Limited - waiting 10s: {url}")
+                time.sleep(10)
+                return self.download_with_retry_complete(url, retry_count + 1)
+            else:
+                print(f"    ⚠️ HTTP {response.status_code} for {url}")
+                time.sleep(3)
+                return self.download_with_retry_complete(url, retry_count + 1)
+                
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
+            time.sleep(3)
+            return self.download_with_retry_complete(url, retry_count + 1)
+
+    def crawl_website_complete(self, start_url, downloaded_content):
+        """Complete website crawling with asset capture"""
+        print("🕷️ Starting COMPLETE website crawl...")
+        
+        self.pages_to_crawl.append(start_url)
+        self.visited_urls.add(start_url)
+        
+        crawled_pages = 0
+        consecutive_failures = 0
+        
+        while self.pages_to_crawl and crawled_pages < self.max_pages:
+            if consecutive_failures >= 5:
+                print("    🚨 Too many failures, stopping crawl")
+                break
+                
+            current_url = self.pages_to_crawl.popleft()
+            
+            print(f"📄 [{crawled_pages+1}/{self.max_pages}] {os.path.basename(current_url) or current_url[:80]}")
+            
+            # Download the page
+            page_data = self.download_page_complete(current_url)
+            if page_data:
+                downloaded_content['pages'][current_url] = page_data
+                crawled_pages += 1
+                consecutive_failures = 0
+                
+                # Extract links for further crawling
+                new_links = self.extract_all_links_complete(page_data['content'], current_url)
+                for link in new_links:
+                    if link not in self.visited_urls and link not in self.failed_urls:
+                        self.visited_urls.add(link)
+                        self.pages_to_crawl.append(link)
+                
+                # Download ALL assets including CSS from this page
+                self.download_all_assets_complete(page_data['content'], current_url, downloaded_content)
+                
+                time.sleep(random.uniform(1, 2))
+            else:
+                consecutive_failures += 1
+                print(f"    ❌ Failed (#{consecutive_failures})")
+        
+        print(f"✅ Crawl complete: {crawled_pages} pages")
+
+    def download_page_complete(self, url):
+        """Download a single page"""
+        response = self.download_with_retry_complete(url)
+        if response and response.status_code == 200:
+            return {
+                'url': response.url,
+                'content': response.text,
+                'content_type': response.headers.get('content-type', 'text/html'),
+                'status_code': 200,
+                'downloaded_with': 'session'
+            }
+        return None
 
     def download_asset_complete(self, url):
         """Download asset with complete error handling - FIXED for CSS"""
@@ -237,7 +370,34 @@ class CompleteWebsiteDownloader:
         except Exception as e:
             print(f"      ⚠️ CSS asset download error: {e}")
 
-    # ... [rest of the methods remain the same as previous version] ...
+    def get_selenium_resources(self):
+        """Use Selenium to find additional resources"""
+        resources = set()
+        try:
+            # Get all resource URLs from browser network (approximation)
+            scripts = self.driver.find_elements(By.TAG_NAME, "script")
+            links = self.driver.find_elements(By.TAG_NAME, "link")
+            images = self.driver.find_elements(By.TAG_NAME, "img")
+            
+            for script in scripts:
+                src = script.get_attribute("src")
+                if src and src.startswith('http'):
+                    resources.add(src)
+            
+            for link in links:
+                href = link.get_attribute("href")
+                if href and href.startswith('http'):
+                    resources.add(href)
+            
+            for img in images:
+                src = img.get_attribute("src")
+                if src and src.startswith('http'):
+                    resources.add(src)
+                    
+        except Exception as e:
+            print(f"      ⚠️ Selenium resource error: {e}")
+        
+        return resources
 
     def download_all_assets_complete(self, html, base_url, downloaded_content):
         """Download ALL assets - COMPLETE VERSION"""
@@ -313,7 +473,127 @@ class CompleteWebsiteDownloader:
         
         print(f"    ✅ Downloaded: {successful}/{len(all_resource_urls)} assets")
 
-    # ... [rest of the class methods remain unchanged] ...
+    def download_website(self, url):
+        """Main download method"""
+        print(f"⬇️ Target: {url}")
+        
+        # Manual Cloudflare solve
+        if not self.manual_cloudflare_solve(url):
+            print("❌ Failed to setup Chrome session")
+            return None
+        
+        # Download with complete approach
+        result = self.download_with_session_complete(url)
+        
+        # Cleanup
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
+        
+        return result
+
+    def download_with_session_complete(self, url):
+        """Download using complete approach"""
+        print("⬇️ Downloading with COMPLETE asset capture...")
+        
+        downloaded_content = {
+            'main_url': url,
+            'pages': {},
+            'assets': {},
+            'timestamp': time.time(),
+        }
+        
+        # Reset state
+        self.visited_urls.clear()
+        self.pages_to_crawl.clear()
+        self.failed_urls.clear()
+        
+        # Start complete crawling
+        self.crawl_website_complete(url, downloaded_content)
+        
+        print(f"    📊 Total pages: {len(downloaded_content['pages'])}")
+        print(f"    📊 Total assets: {len(downloaded_content['assets'])}")
+        
+        # Count CSS files specifically
+        css_count = sum(1 for asset_url in downloaded_content['assets'] if asset_url.endswith('.css'))
+        print(f"    🎨 CSS files: {css_count}")
+        
+        # Save file
+        domain = urlparse(url).netloc.replace(':', '_')
+        filename = f"{domain}_COMPLETE_{int(time.time())}.page"
+        filepath = os.path.join(self.output_dir, filename)
+        
+        if self.save_page_file(filepath, downloaded_content):
+            print(f"💾 Saved: {filename}")
+            return filepath
+        else:
+            print(f"❌ Failed to save: {filename}")
+            return None
+
+    def save_page_file(self, filepath, content):
+        """Save as .page file"""
+        try:
+            with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Metadata
+                metadata = {
+                    'main_url': content['main_url'],
+                    'timestamp': content['timestamp'],
+                    'pages': len(content['pages']),
+                    'assets': len(content['assets']),
+                    'css_files': sum(1 for url in content['assets'] if url.endswith('.css')),
+                    'total_size': sum(len(asset['content']) for asset in content['assets'].values())
+                }
+                zipf.writestr('metadata.json', json.dumps(metadata, indent=2))
+                
+                # Pages
+                for url, data in content['pages'].items():
+                    hash_val = hashlib.md5(url.encode()).hexdigest()[:10]
+                    zipf.writestr(f"pages/{hash_val}.json", json.dumps(data, indent=2))
+                
+                # Assets
+                for url, data in content['assets'].items():
+                    hash_val = hashlib.md5(url.encode()).hexdigest()[:10]
+                    zipf.writestr(f"assets/{hash_val}.json", json.dumps(data, indent=2))
+            
+            file_size = os.path.getsize(filepath) / (1024 * 1024)
+            print(f"    💾 File size: {file_size:.2f} MB")
+            return os.path.exists(filepath)
+        except Exception as e:
+            print(f"    ❌ Save error: {e}")
+            return False
+
+    def download_from_list(self, url_list):
+        """Download multiple sites"""
+        downloaded_files = []
+        
+        print(f"🎯 Downloading {len(url_list)} sites with COMPLETE assets...")
+        print(f"📁 Output: {self.output_dir}")
+        
+        for i, url in enumerate(url_list, 1):
+            url = url.strip()
+            if not url:
+                continue
+                
+            print(f"\n{'='*50}")
+            print(f"#{i}: {url}")
+            print("="*50)
+            
+            try:
+                filepath = self.download_website(url)
+                if filepath:
+                    downloaded_files.append(filepath)
+                    print(f"✅ Success! Downloaded {len(downloaded_files)} sites")
+                else:
+                    print(f"❌ Failed")
+                    
+            except Exception as e:
+                print(f"❌ Error: {e}")
+        
+        print(f"\n{'='*50}")
+        print(f"📊 Complete: {len(downloaded_files)}/{len(url_list)} sites")
+        print(f"💾 Location: {self.output_dir}")
+        
+        return downloaded_files
 
 if __name__ == "__main__":
     print("="*50)
