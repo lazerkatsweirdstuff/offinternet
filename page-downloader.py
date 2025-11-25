@@ -21,7 +21,7 @@ from fake_useragent import UserAgent
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class SmartWebsiteDownloader:
+class BalancedWebsiteDownloader:
     def __init__(self, output_dir=None):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if output_dir is None:
@@ -40,13 +40,10 @@ class SmartWebsiteDownloader:
         self.visited_urls = set()
         self.pages_to_crawl = deque()
         self.failed_urls = set()
-        self.max_pages = 500  # Reduced for stability
-        self.crawl_delay = random.uniform(2, 5)  # Random delay between requests
-        self.max_retries = 3
-        self.respect_robots = True
-        
-        # Domain-specific settings
-        self.domain_limits = {}
+        self.max_pages = 300  # Reasonable limit
+        self.crawl_delay = random.uniform(1, 3)  # Balanced delay
+        self.max_retries = 2
+        self.domain_assets = set()  # Track assets we've found
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -56,17 +53,16 @@ class SmartWebsiteDownloader:
         """Update session headers with random user agent"""
         headers = {
             'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
+            'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
         }
         self.session.headers.update(headers)
 
-    def setup_chrome_stealth(self):
-        """Setup Chrome with stealth options"""
+    def setup_chrome_balanced(self):
+        """Setup Chrome with balanced options"""
         try:
             chrome_options = Options()
             chrome_options.add_argument("--incognito")
@@ -75,132 +71,92 @@ class SmartWebsiteDownloader:
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1400,1000")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             chrome_options.add_argument(f"--user-agent={self.ua.random}")
             
-            # Additional stealth options
-            chrome_options.add_argument("--disable-web-security")
-            chrome_options.add_argument("--allow-running-insecure-content")
-            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-            chrome_options.add_argument("--disable-background-timer-throttling")
-            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-            chrome_options.add_argument("--disable-renderer-backgrounding")
-            
-            print("🔄 Starting Chrome in stealth mode...")
+            print("🔄 Starting Chrome...")
             self.driver = webdriver.Chrome(options=chrome_options)
             
-            # Additional stealth scripts
+            # Stealth modifications
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": self.ua.random})
             
             self.driver.implicitly_wait(10)
-            print("✅ Chrome started successfully in stealth mode")
+            print("✅ Chrome started successfully")
             return True
             
         except Exception as e:
             print(f"❌ Failed to start Chrome: {e}")
             return False
 
-    def is_valid_url(self, url, base_domain):
-        """Check if URL is valid for crawling"""
-        try:
-            parsed = urlparse(url)
-            base_parsed = urlparse(base_domain)
-            
-            # Must have http or https
-            if not url.startswith(('http://', 'https://')):
-                return False
-            
-            # Should be same domain
-            if parsed.netloc != base_parsed.netloc:
-                return False
-            
-            # Avoid common non-content URLs
-            excluded_extensions = ['.pdf', '.zip', '.exe', '.dmg', '.mp4', '.mp3', '.avi', '.mov']
-            if any(parsed.path.lower().endswith(ext) for ext in excluded_extensions):
-                return False
-            
-            # Avoid URLs with certain patterns
-            excluded_patterns = ['/cdn-cgi/', '/api/', '/ajax/', '/admin/', '/login/', '/signin/']
-            if any(pattern in url.lower() for pattern in excluded_patterns):
-                return False
-            
-            return True
-            
-        except Exception:
-            return False
-
-    def extract_quality_links(self, html, base_url):
-        """Extract high-quality links likely to be actual content pages"""
+    def extract_all_links_balanced(self, html, base_url):
+        """Extract ALL links but filter obvious junk"""
         soup = BeautifulSoup(html, 'html.parser')
         links = set()
         base_domain = urlparse(base_url).netloc
         
-        # Get all anchor tags with href
+        # Get all anchor tags
         for link in soup.find_all('a', href=True):
             href = link['href']
             if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 full_url = urljoin(base_url, href)
                 
-                # Clean URL - remove fragments and common tracking parameters
+                # Clean URL
                 clean_url = self.clean_url(full_url)
                 
-                if self.is_valid_url(clean_url, base_url):
-                    # Prioritize links that look like content
-                    text = link.get_text().strip().lower()
-                    parent_classes = ' '.join(link.parent.get('class', [])).lower() if link.parent else ''
-                    
-                    # Skip navigation, footer, sidebar links often
-                    skip_indicators = ['nav', 'menu', 'footer', 'sidebar', 'breadcrumb', 'pagination']
-                    if any(indicator in parent_classes for indicator in skip_indicators):
-                        continue
-                    
-                    # Skip very short link text (often icons)
-                    if len(text) < 2:
-                        continue
-                        
+                # Basic validation
+                if (clean_url.startswith(('http://', 'https://')) and 
+                    base_domain in clean_url and
+                    not self.is_likely_junk(clean_url)):
                     links.add(clean_url)
         
         return links
 
+    def is_likely_junk(self, url):
+        """Filter out obviously junk URLs"""
+        junk_patterns = [
+            '/cdn-cgi/', '/wp-admin/', '/wp-json/', '/administrator/', 
+            '/phpmyadmin/', '/server-status/', '.pdf', '.zip', '.exe',
+            '/api/', '/ajax/', '/graphql', '/websocket', '/.env',
+            'click', 'track', 'affiliate', 'promo', 'banner'
+        ]
+        url_lower = url.lower()
+        return any(pattern in url_lower for pattern in junk_patterns)
+
     def clean_url(self, url):
-        """Clean URL by removing fragments and common tracking parameters"""
+        """Clean URL but keep important parameters"""
         try:
             parsed = urlparse(url)
             
-            # Remove fragment
+            # Remove fragment only
             cleaned = parsed._replace(fragment='')
             
-            # Remove common tracking parameters
-            query_params = []
+            # Keep most parameters but remove obvious trackers
             if parsed.query:
+                params = []
                 for param in parsed.query.split('&'):
                     key = param.split('=')[0].lower()
-                    # Keep important parameters, remove tracking ones
-                    if key in ['id', 'page', 'view', 'article', 'product']:
-                        query_params.append(param)
-                    elif not any(track in key for track in ['utm_', 'source', 'medium', 'campaign', 'fbclid', 'gclid']):
-                        query_params.append(param)
+                    # Remove only the worst trackers
+                    if not any(tracker in key for tracker in ['utm_', 'fbclid', 'gclid', '_ga']):
+                        params.append(param)
+                cleaned = cleaned._replace(query='&'.join(params))
             
-            cleaned = cleaned._replace(query='&'.join(query_params))
             return cleaned.geturl()
-            
         except Exception:
             return url
 
-    def download_with_retry(self, url, retry_count=0):
-        """Download with retry logic and smart error handling"""
+    def download_with_retry_balanced(self, url, retry_count=0):
+        """Download with balanced retry logic"""
         if retry_count >= self.max_retries:
             self.failed_urls.add(url)
             return None
         
         try:
-            # Random delay between requests
-            time.sleep(random.uniform(1, 3))
+            # Small random delay
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Rotate user agent occasionally
-            if random.random() < 0.3:  # 30% chance to rotate UA
+            if random.random() < 0.2:
                 self.update_session_headers()
             
             response = self.session.get(url, timeout=15, allow_redirects=True)
@@ -209,84 +165,77 @@ class SmartWebsiteDownloader:
                 return response
             elif response.status_code == 403:
                 print(f"    🚫 403 Forbidden: {url}")
-                # Wait longer for 403 errors
-                time.sleep(10)
-                return self.download_with_retry(url, retry_count + 1)
+                time.sleep(5)
+                return self.download_with_retry_balanced(url, retry_count + 1)
             elif response.status_code == 404:
                 print(f"    ❓ 404 Not Found: {url}")
                 self.failed_urls.add(url)
                 return None
-            elif response.status_code == 429:  # Too Many Requests
-                print(f"    🐢 429 Rate Limited: {url} - Waiting 30 seconds...")
-                time.sleep(30)
-                return self.download_with_retry(url, retry_count + 1)
+            elif response.status_code == 429:
+                print(f"    🐢 429 Rate Limited - waiting 10s: {url}")
+                time.sleep(10)
+                return self.download_with_retry_balanced(url, retry_count + 1)
             else:
                 print(f"    ⚠️ HTTP {response.status_code} for {url}")
-                time.sleep(5)
-                return self.download_with_retry(url, retry_count + 1)
+                time.sleep(3)
+                return self.download_with_retry_balanced(url, retry_count + 1)
                 
         except requests.exceptions.Timeout:
             print(f"    ⏰ Timeout for {url}")
-            time.sleep(10)
-            return self.download_with_retry(url, retry_count + 1)
-        except requests.exceptions.ConnectionError:
-            print(f"    🔌 Connection error for {url}")
-            time.sleep(15)
-            return self.download_with_retry(url, retry_count + 1)
-        except Exception as e:
-            print(f"    ❌ Error downloading {url}: {e}")
             time.sleep(5)
-            return self.download_with_retry(url, retry_count + 1)
+            return self.download_with_retry_balanced(url, retry_count + 1)
+        except Exception as e:
+            print(f"    ❌ Error: {e}")
+            time.sleep(3)
+            return self.download_with_retry_balanced(url, retry_count + 1)
 
-    def crawl_website_smart(self, start_url, downloaded_content):
-        """Smarter website crawling with error handling"""
-        print("🕷️ Starting SMART website crawl...")
+    def crawl_website_balanced(self, start_url, downloaded_content):
+        """Balanced crawling - gets content without being too aggressive"""
+        print("🕷️ Starting BALANCED website crawl...")
         
         self.pages_to_crawl.append(start_url)
         self.visited_urls.add(start_url)
         
         crawled_pages = 0
         consecutive_failures = 0
-        max_consecutive_failures = 5
         
         while self.pages_to_crawl and crawled_pages < self.max_pages:
-            if consecutive_failures >= max_consecutive_failures:
-                print("    🚨 Too many consecutive failures, stopping crawl")
+            if consecutive_failures >= 8:
+                print("    🚨 Too many failures, stopping crawl")
                 break
                 
             current_url = self.pages_to_crawl.popleft()
             
-            print(f"📄 Crawling [{crawled_pages+1}/{self.max_pages}]: {current_url}")
+            print(f"📄 [{crawled_pages+1}/{self.max_pages}] {os.path.basename(current_url) or current_url[:80]}")
             
-            # Download the page with retry logic
-            page_data = self.download_page_smart(current_url)
+            # Download the page
+            page_data = self.download_page_balanced(current_url)
             if page_data:
                 downloaded_content['pages'][current_url] = page_data
                 crawled_pages += 1
                 consecutive_failures = 0
                 
-                # Extract QUALITY links from this page
-                new_links = self.extract_quality_links(page_data['content'], current_url)
+                # Extract links for further crawling
+                new_links = self.extract_all_links_balanced(page_data['content'], current_url)
                 for link in new_links:
                     if link not in self.visited_urls and link not in self.failed_urls:
                         self.visited_urls.add(link)
                         self.pages_to_crawl.append(link)
-                        print(f"    🔗 Found quality page: {os.path.basename(link) or link[:60]}")
                 
-                # Download resources for this page
-                self.download_all_resources_smart(page_data['content'], current_url, downloaded_content)
+                # Download ALL important assets for this page
+                self.download_all_assets_comprehensive(page_data['content'], current_url, downloaded_content)
                 
-                # Random delay between pages
-                time.sleep(random.uniform(2, 4))
+                # Reasonable delay
+                time.sleep(random.uniform(1, 2))
             else:
                 consecutive_failures += 1
-                print(f"    ❌ Failed to download (failure #{consecutive_failures}): {current_url}")
+                print(f"    ❌ Failed (#{consecutive_failures})")
         
-        print(f"✅ Crawl complete: {crawled_pages} pages downloaded, {len(self.failed_urls)} failed")
+        print(f"✅ Crawl complete: {crawled_pages} pages, {len(self.failed_urls)} failed")
 
-    def download_page_smart(self, url):
-        """Download a single page with smart error handling"""
-        response = self.download_with_retry(url)
+    def download_page_balanced(self, url):
+        """Download a single page"""
+        response = self.download_with_retry_balanced(url)
         if response and response.status_code == 200:
             return {
                 'url': response.url,
@@ -297,82 +246,147 @@ class SmartWebsiteDownloader:
             }
         return None
 
-    def download_all_resources_smart(self, html, base_url, downloaded_content):
-        """Smart resource downloading with filtering"""
+    def download_all_assets_comprehensive(self, html, base_url, downloaded_content):
+        """Download ALL assets - comprehensive approach"""
         soup = BeautifulSoup(html, 'html.parser')
         
-        # Find resources but filter out likely CDN/blocked URLs
-        resource_urls = set()
+        # Find ALL resource URLs
+        all_resource_urls = set()
         base_domain = urlparse(base_url).netloc
         
-        # CSS files - only from same domain
+        # CSS files - get ALL
         for link in soup.find_all('link', href=True):
             href = link.get('href')
             if href and not href.startswith(('data:', 'blob:', 'javascript:')):
                 full_url = urljoin(base_url, href)
-                if base_domain in full_url:  # Only same domain CSS
-                    resource_urls.add(full_url)
+                all_resource_urls.add(full_url)
         
-        # JavaScript files - only from same domain
+        # JavaScript files - get ALL  
         for script in soup.find_all('script', src=True):
             src = script.get('src')
             if src and not src.startswith(('data:', 'blob:', 'javascript:')):
                 full_url = urljoin(base_url, src)
-                if base_domain in full_url:  # Only same domain JS
-                    resource_urls.add(full_url)
+                all_resource_urls.add(full_url)
         
-        # Images - be more permissive
+        # Images - get ALL
         for img in soup.find_all('img', src=True):
             src = img.get('src')
             if src and not src.startswith(('data:', 'blob:', 'javascript:')):
                 full_url = urljoin(base_url, src)
-                resource_urls.add(full_url)
+                all_resource_urls.add(full_url)
         
-        print(f"    📦 Found {len(resource_urls)} resources to download")
+        # Meta tags (icons, etc.)
+        for meta in soup.find_all('meta', content=True):
+            if meta.get('property') in ['og:image', 'og:audio', 'og:video']:
+                full_url = urljoin(base_url, meta['content'])
+                all_resource_urls.add(full_url)
         
-        # Download resources with concurrency control
+        # Source tags (videos, pictures)
+        for source in soup.find_all('source', src=True):
+            full_url = urljoin(base_url, source['src'])
+            all_resource_urls.add(full_url)
+        
+        # CSS url() references
+        for tag in soup.find_all(style=True):
+            urls = re.findall(r'url\([\'"]?([^)"\']+)[\'"]?\)', tag['style'])
+            for url in urls:
+                if not url.startswith(('data:', 'blob:')):
+                    full_url = urljoin(base_url, url)
+                    all_resource_urls.add(full_url)
+        
+        # Style tag content
+        for style in soup.find_all('style'):
+            if style.string:
+                urls = re.findall(r'url\([\'"]?([^)"\']+)[\'"]?\)', style.string)
+                for url in urls:
+                    if not url.startswith(('data:', 'blob:')):
+                        full_url = urljoin(base_url, url)
+                        all_resource_urls.add(full_url)
+        
+        # Script tag content (dynamic imports, etc.)
+        for script in soup.find_all('script'):
+            if script.string:
+                # Look for common asset patterns in JS
+                patterns = [
+                    r'["\'](https?://[^"\']+\.(css|js|png|jpg|jpeg|gif|svg|ico|webp|woff|woff2|ttf|eot))["\']',
+                    r'["\'](/[^"\']+\.(css|js|png|jpg|jpeg|gif|svg|ico|webp|woff|woff2|ttf|eot))["\']',
+                    r'url\(["\']?(https?://[^"\'\)]+)["\']?\)',
+                    r'url\(["\']?(/[^"\'\)]+)["\']?\)'
+                ]
+                for pattern in patterns:
+                    matches = re.findall(pattern, script.string)
+                    for match in matches:
+                        url = match[0] if isinstance(match, tuple) else match
+                        full_url = urljoin(base_url, url)
+                        all_resource_urls.add(full_url)
+        
+        print(f"    📦 Found {len(all_resource_urls)} total assets")
+        
+        # Download assets with priority
         successful = 0
-        for i, resource_url in enumerate(resource_urls):
+        critical_assets = 0
+        other_assets = 0
+        
+        for i, resource_url in enumerate(all_resource_urls):
             if resource_url in downloaded_content['assets']:
                 continue
-                
-            name = os.path.basename(resource_url) or resource_url[:50]
-            print(f"    [{i+1}/{len(resource_urls)}] Downloading: {name}")
             
-            asset_data = self.download_resource_smart(resource_url)
+            # Skip if we've already failed this URL
+            if resource_url in self.failed_urls:
+                continue
+            
+            filename = os.path.basename(resource_url) or resource_url[:60]
+            
+            # Priority download for critical assets
+            is_critical = any(resource_url.endswith(ext) for ext in 
+                            ['.css', '.js', '.woff', '.woff2', '.ttf', '.eot'])
+            
+            if is_critical:
+                critical_assets += 1
+                print(f"    🎯 [{i+1}/{len(all_resource_urls)}] CRITICAL: {filename}")
+            else:
+                other_assets += 1
+                print(f"    📁 [{i+1}/{len(all_resource_urls)}] Asset: {filename}")
+            
+            asset_data = self.download_asset_balanced(resource_url)
             if asset_data:
                 downloaded_content['assets'][resource_url] = asset_data
                 successful += 1
             else:
-                print(f"      ❌ Failed to download: {name}")
+                print(f"      ❌ Failed: {filename}")
+                self.failed_urls.add(resource_url)
             
-            # Small delay between resource downloads
-            time.sleep(0.5)
+            # Small delay between asset downloads
+            time.sleep(0.3)
         
-        print(f"    ✅ Successfully downloaded: {successful}/{len(resource_urls)} assets")
+        print(f"    ✅ Downloaded: {successful}/{len(all_resource_urls)} assets ({critical_assets} critical)")
 
-    def download_resource_smart(self, url):
-        """Download resource with smart error handling"""
+    def download_asset_balanced(self, url):
+        """Download asset with good error handling"""
         try:
             response = self.session.get(url, timeout=10, stream=True)
             if response.status_code == 200:
                 content_type = response.headers.get('content-type', '').lower()
                 
-                # Skip very large files
-                content_length = response.headers.get('content-length')
-                if content_length and int(content_length) > 50 * 1024 * 1024:  # 50MB limit
-                    print(f"      ⚠️ Skipping large file: {url}")
-                    return None
-                
                 # Handle binary content
-                if any(ct in content_type for ct in ['image', 'font', 'binary', 'video', 'audio', 'octet-stream']):
+                if any(ct in content_type for ct in ['image', 'font', 'binary', 'octet-stream']):
                     content = response.content
+                    # Skip very large files (>10MB)
+                    if len(content) > 10 * 1024 * 1024:
+                        print(f"      ⚠️ Skipping large file: {len(content)//1024}KB")
+                        return None
                     encoded = base64.b64encode(content).decode('utf-8')
                     encoding = 'base64'
                 else:
                     # Text content
-                    encoded = response.text
-                    encoding = 'text'
+                    content = response.content
+                    try:
+                        encoded = content.decode('utf-8')
+                        encoding = 'text'
+                    except UnicodeDecodeError:
+                        # Fallback for binary files mislabeled as text
+                        encoded = base64.b64encode(content).decode('utf-8')
+                        encoding = 'base64'
                 
                 return {
                     'url': url,
@@ -389,16 +403,16 @@ class SmartWebsiteDownloader:
             return None
 
     def download_website(self, url):
-        """Main download method with better error handling"""
+        """Main download method"""
         print(f"⬇️ Target: {url}")
         
-        # Manual Cloudflare solve
+        # Manual Cloudflare solve if needed
         if not self.manual_cloudflare_solve(url):
             print("❌ Failed to setup Chrome session")
             return None
         
-        # Download with session AND SMART CRAWLING
-        result = self.download_with_session_smart(url)
+        # Download with balanced approach
+        result = self.download_with_session_balanced(url)
         
         # Cleanup
         if self.driver:
@@ -407,9 +421,9 @@ class SmartWebsiteDownloader:
         
         return result
 
-    def download_with_session_smart(self, url):
-        """Download using captured session with smart crawling"""
-        print("⬇️ Downloading with SMART session and crawling...")
+    def download_with_session_balanced(self, url):
+        """Download using balanced approach"""
+        print("⬇️ Downloading with BALANCED approach...")
         
         downloaded_content = {
             'main_url': url,
@@ -418,16 +432,16 @@ class SmartWebsiteDownloader:
             'timestamp': time.time(),
         }
         
-        # Reset crawling state
+        # Reset state
         self.visited_urls.clear()
         self.pages_to_crawl.clear()
         self.failed_urls.clear()
         
-        # Start SMART crawling from the main URL
-        self.crawl_website_smart(url, downloaded_content)
+        # Start balanced crawling
+        self.crawl_website_balanced(url, downloaded_content)
         
-        print(f"    📊 Total pages downloaded: {len(downloaded_content['pages'])}")
-        print(f"    📊 Total assets downloaded: {len(downloaded_content['assets'])}")
+        print(f"    📊 Total pages: {len(downloaded_content['pages'])}")
+        print(f"    📊 Total assets: {len(downloaded_content['assets'])}")
         print(f"    📊 Failed URLs: {len(self.failed_urls)}")
         
         # Save file
@@ -452,7 +466,6 @@ class SmartWebsiteDownloader:
                     'timestamp': content['timestamp'],
                     'pages': len(content['pages']),
                     'assets': len(content['assets']),
-                    'failed_urls': list(self.failed_urls),
                     'total_size': sum(len(asset['content']) for asset in content['assets'].values())
                 }
                 zipf.writestr('metadata.json', json.dumps(metadata, indent=2))
@@ -475,11 +488,11 @@ class SmartWebsiteDownloader:
             return False
 
     def manual_cloudflare_solve(self, url):
-        """Manual Cloudflare solving - same as before"""
-        print("🚨 CLOUDFLARE SOLVER - STEALTH MODE")
+        """Manual Cloudflare solving"""
+        print("🚨 CLOUDFLARE SOLVER")
         print("="*50)
         
-        if not self.setup_chrome_stealth():
+        if not self.setup_chrome_balanced():
             return False
             
         try:
@@ -547,9 +560,9 @@ class SmartWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*50)
-    print("🚀 SMART WEBSITE DOWNLOADER - STEALTH MODE")
-    print("📥 Downloads quality pages with error handling")
-    print("🌐 Avoids blocks and handles failures gracefully")
+    print("🚀 BALANCED WEBSITE DOWNLOADER")
+    print("📥 Gets ALL important assets without being blocked")
+    print("🌐 Comprehensive asset discovery")
     print("="*50)
     
     # Install required package if not present
@@ -572,11 +585,11 @@ if __name__ == "__main__":
         if user_input:
             sites = [site.strip() for site in user_input.split(',')]
     
-    downloader = SmartWebsiteDownloader()
+    downloader = BalancedWebsiteDownloader()
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded sites with quality pages and assets")
+        print(f"\n🎉 Success! Downloaded sites with COMPLETE assets")
         print("💡 Now run the browser.py to view your downloaded sites!")
     else:
         print(f"\n❌ No sites downloaded")
