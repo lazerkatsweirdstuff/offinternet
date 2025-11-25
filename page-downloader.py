@@ -30,7 +30,7 @@ class AdvancedWebsiteDownloader:
         
         self.driver = None
         self.visited_urls = set()
-        self.max_pages = 10
+        self.max_pages = 10000
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
