@@ -254,30 +254,26 @@ class CompleteWebsiteDownloader:
         return None
 
     def download_asset_complete(self, url):
-        """Download asset with complete error handling - FIXED for CSS"""
+        """Download asset with complete error handling - IMPROVED for CSS"""
         try:
-            response = self.session.get(url, timeout=10, stream=True)
+            # Special handling for CSS files - don't auto-decompress
+            if url.endswith('.css'):
+                headers = self.session.headers.copy()
+                headers['Accept-Encoding'] = 'identity'  # Don't accept gzip for CSS
+                response = self.session.get(url, timeout=10, stream=True, headers=headers)
+            else:
+                response = self.session.get(url, timeout=10, stream=True)
+                
             if response.status_code == 200:
                 content_type = response.headers.get('content-type', '').lower()
                 
-                # Check if content is gzipped
-                is_gzipped = response.headers.get('content-encoding') == 'gzip'
-                
-                # Handle binary content - including CSS that might be binary/gzipped
-                if any(ct in content_type for ct in ['image', 'font', 'binary', 'octet-stream']) or is_gzipped or url.endswith('.css'):
+                # For CSS files, always treat as binary to preserve content
+                if url.endswith('.css'):
                     content = response.content
-                    
-                    # For CSS files, try to handle gzipped content
-                    if url.endswith('.css') and is_gzipped:
-                        try:
-                            content = gzip.decompress(content)
-                            print(f"      🔧 Decompressed gzipped CSS")
-                        except Exception as e:
-                            print(f"      ⚠️ Could not decompress CSS: {e}")
                     
                     # Skip very large files (>5MB)
                     if len(content) > 5 * 1024 * 1024:
-                        print(f"      ⚠️ Skipping large file: {len(content)//1024}KB")
+                        print(f"      ⚠️ Skipping large CSS file: {len(content)//1024}KB")
                         return None
                     
                     encoded = base64.b64encode(content).decode('utf-8')
@@ -290,28 +286,55 @@ class CompleteWebsiteDownloader:
                         'encoding': encoding,
                         'size': len(encoded),
                         'filename': os.path.basename(urlparse(url).path) or 'resource',
-                        'is_gzipped': is_gzipped
+                        'is_css': True
                     }
                 else:
-                    # Text content
-                    content = response.content
-                    try:
-                        encoded = content.decode('utf-8')
-                        encoding = 'text'
-                    except UnicodeDecodeError:
-                        # Fallback for binary files mislabeled as text
+                    # Handle other content types normally
+                    is_gzipped = response.headers.get('content-encoding') == 'gzip'
+                    
+                    if any(ct in content_type for ct in ['image', 'font', 'binary', 'octet-stream']) or is_gzipped:
+                        content = response.content
+                        
+                        if is_gzipped:
+                            try:
+                                content = gzip.decompress(content)
+                            except:
+                                pass  # Keep as-is if decompression fails
+                        
+                        # Skip very large files (>5MB)
+                        if len(content) > 5 * 1024 * 1024:
+                            print(f"      ⚠️ Skipping large file: {len(content)//1024}KB")
+                            return None
+                        
                         encoded = base64.b64encode(content).decode('utf-8')
                         encoding = 'base64'
-                    
-                    return {
-                        'url': url,
-                        'content': encoded,
-                        'content_type': content_type,
-                        'encoding': encoding,
-                        'size': len(encoded),
-                        'filename': os.path.basename(urlparse(url).path) or 'resource',
-                        'is_gzipped': is_gzipped
-                    }
+                        
+                        return {
+                            'url': url,
+                            'content': encoded,
+                            'content_type': content_type,
+                            'encoding': encoding,
+                            'size': len(encoded),
+                            'filename': os.path.basename(urlparse(url).path) or 'resource'
+                        }
+                    else:
+                        # Text content
+                        content = response.content
+                        try:
+                            encoded = content.decode('utf-8')
+                            encoding = 'text'
+                        except UnicodeDecodeError:
+                            encoded = base64.b64encode(content).decode('utf-8')
+                            encoding = 'base64'
+                        
+                        return {
+                            'url': url,
+                            'content': encoded,
+                            'content_type': content_type,
+                            'encoding': encoding,
+                            'size': len(encoded),
+                            'filename': os.path.basename(urlparse(url).path) or 'resource'
+                        }
             else:
                 return None
                 
@@ -320,30 +343,49 @@ class CompleteWebsiteDownloader:
             return None
 
     def download_css_assets(self, css_asset, css_url, downloaded_content):
-        """Download assets referenced in CSS files - FIXED for binary CSS"""
+        """Download assets referenced in CSS files - FIXED for gzipped CSS"""
         try:
             css_content = css_asset['content']
             
             # Handle both text and base64 encoded CSS
             if css_asset['encoding'] == 'base64':
                 css_content = base64.b64decode(css_content)
-                # Try to decode as text, but fall back to binary processing
+                
+                # Try multiple methods to decode the CSS content
+                css_text = None
+                
+                # Method 1: Try direct UTF-8 decode
                 try:
                     css_text = css_content.decode('utf-8')
+                    print("      🔍 CSS decoded as UTF-8 text")
                 except UnicodeDecodeError:
-                    # CSS might be gzipped or binary, try to decompress
+                    # Method 2: Try gzip decompression
                     try:
-                        css_text = gzip.decompress(css_content).decode('utf-8')
-                        print("      🔍 Decompressed gzipped CSS for asset extraction")
-                    except:
-                        print("      ⚠️ CSS is binary/gzipped, cannot extract assets from it")
-                        return
+                        # Check if it's gzipped by looking for gzip magic number
+                        if css_content[:2] == b'\x1f\x8b':
+                            css_text = gzip.decompress(css_content).decode('utf-8')
+                            print("      🔍 Decompressed gzipped CSS for asset extraction")
+                        else:
+                            # Method 3: Try other encodings
+                            try:
+                                css_text = css_content.decode('latin-1')
+                                print("      🔍 CSS decoded as latin-1 text")
+                            except:
+                                # Method 4: Try to detect if it's minified CSS and process as binary
+                                css_text = self.process_binary_css(css_content)
+                    except Exception as e:
+                        print(f"      ⚠️ CSS decompression failed: {e}")
+                        css_text = self.process_binary_css(css_content)
             else:
                 # Already text
                 css_text = css_content
             
+            if not css_text:
+                print("      ⚠️ Could not extract text from CSS, skipping asset extraction")
+                return
+            
             # Find all url() references in CSS
-            urls = re.findall(r'url\([\'"]?([^)"\']+)[\'"]?\)', css_text)
+            urls = self.extract_css_urls(css_text)
             base_dir = os.path.dirname(css_url)
             
             print(f"      🔍 CSS references {len(urls)} assets")
@@ -357,6 +399,9 @@ class CompleteWebsiteDownloader:
                     # Absolute path - use same domain as CSS
                     parsed_css = urlparse(css_url)
                     full_url = f"{parsed_css.scheme}://{parsed_css.netloc}{url}"
+                elif url.startswith(('http://', 'https://')):
+                    # Already absolute
+                    full_url = url
                 else:
                     # Relative path
                     full_url = urljoin(base_dir + '/', url)
@@ -366,9 +411,62 @@ class CompleteWebsiteDownloader:
                     asset_data = self.download_asset_complete(full_url)
                     if asset_data:
                         downloaded_content['assets'][full_url] = asset_data
-        
+            
         except Exception as e:
             print(f"      ⚠️ CSS asset download error: {e}")
+
+    def process_binary_css(self, css_content):
+        """Try to extract URLs from binary CSS content"""
+        try:
+            # Convert to string using latin-1 which preserves all bytes
+            css_text = css_content.decode('latin-1')
+            
+            # Try to find URLs using multiple patterns
+            urls_patterns = [
+                r'url\([\'"]?([^)"\']+)[\'"]?\)',
+                r'@import\s+[\'"]([^\'"]+)[\'"]',
+                r'src:\s*url\([\'"]?([^)"\']+)[\'"]?\)'
+            ]
+            
+            all_urls = []
+            for pattern in urls_patterns:
+                urls = re.findall(pattern, css_text)
+                all_urls.extend(urls)
+            
+            if all_urls:
+                print(f"      🔍 Found {len(all_urls)} URLs in binary CSS")
+                return css_text
+            else:
+                print("      ⚠️ No URLs found in binary CSS")
+                return None
+                
+        except Exception as e:
+            print(f"      ⚠️ Binary CSS processing failed: {e}")
+            return None
+
+    def extract_css_urls(self, css_text):
+        """Extract all URLs from CSS text using multiple patterns"""
+        urls = set()
+        
+        # Pattern 1: url() references
+        url_patterns = [
+            r'url\([\'"]?([^)"\']+)[\'"]?\)',
+            r'@import\s+[\'"]([^\'"]+)[\'"]',
+            r'src:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
+            r'@font-face\s*\{[^}]*src:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
+            r'background-image:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
+            r'content:\s*url\([\'"]?([^)"\']+)[\'"]?\)'
+        ]
+        
+        for pattern in url_patterns:
+            matches = re.findall(pattern, css_text, re.IGNORECASE)
+            for match in matches:
+                # Clean up the URL
+                url = match.strip()
+                if url and not url.startswith(('data:', 'blob:')):
+                    urls.add(url)
+        
+        return list(urls)
 
     def get_selenium_resources(self):
         """Use Selenium to find additional resources"""
@@ -597,9 +695,9 @@ class CompleteWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*50)
-    print("🚀 COMPLETE WEBSITE DOWNLOADER - FIXED CSS")
+    print("🚀 COMPLETE WEBSITE DOWNLOADER - FIXED CSS EXTRACTION")
     print("📥 Handles gzipped/binary CSS files properly")
-    print("🌐 Downloads CSS assets without encoding errors")
+    print("🌐 Extracts assets from all CSS files")
     print("="*50)
     
     # Install required package if not present
