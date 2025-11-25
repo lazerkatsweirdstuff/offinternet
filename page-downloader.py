@@ -12,6 +12,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 import sys
+from collections import deque
+import threading
 
 class AdvancedWebsiteDownloader:
     def __init__(self, output_dir=None):
@@ -30,7 +32,9 @@ class AdvancedWebsiteDownloader:
         
         self.driver = None
         self.visited_urls = set()
+        self.pages_to_crawl = deque()
         self.max_pages = 10000
+        self.crawl_delay = 1  # seconds between requests
         
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
@@ -45,17 +49,14 @@ class AdvancedWebsiteDownloader:
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1400,1000")
-            chrome_options.add_argument("--start-maximized")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-plugins")
             
             print("🔄 Starting Chrome in incognito mode...")
             self.driver = webdriver.Chrome(options=chrome_options)
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.driver.implicitly_wait(15)
+            self.driver.implicitly_wait(10)
             print("✅ Chrome started successfully in incognito mode")
             return True
             
@@ -106,59 +107,87 @@ class AdvancedWebsiteDownloader:
             print(f"❌ Error during manual solve: {e}")
             return False
 
-    def download_with_selenium(self, url, downloaded_content):
-        """Use Selenium to extract all resources from the live page"""
-        print("    🚀 Using Selenium to extract resources from live page...")
+    def extract_all_links(self, html, base_url):
+        """Extract all links from HTML for crawling"""
+        soup = BeautifulSoup(html, 'html.parser')
+        links = set()
         
+        # Get all anchor tags
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                full_url = urljoin(base_url, href)
+                # Only add links from the same domain
+                if self.is_same_domain(full_url, base_url):
+                    links.add(full_url)
+        
+        return links
+
+    def is_same_domain(self, url, base_url):
+        """Check if URL is from the same domain"""
         try:
-            # Get all resource URLs that the browser loaded
-            resource_urls = set()
+            parsed_url = urlparse(url)
+            parsed_base = urlparse(base_url)
+            return parsed_url.netloc == parsed_base.netloc
+        except:
+            return False
+
+    def crawl_website(self, start_url, downloaded_content):
+        """Crawl the website and download all pages"""
+        print("🕷️ Starting website crawl...")
+        
+        self.pages_to_crawl.append(start_url)
+        self.visited_urls.add(start_url)
+        
+        crawled_pages = 0
+        
+        while self.pages_to_crawl and crawled_pages < self.max_pages:
+            current_url = self.pages_to_crawl.popleft()
             
-            # Get all links, scripts, images, etc. from the DOM
-            scripts = self.driver.find_elements(By.TAG_NAME, "script")
-            links = self.driver.find_elements(By.TAG_NAME, "link")
-            images = self.driver.find_elements(By.TAG_NAME, "img")
+            print(f"📄 Crawling [{crawled_pages+1}/{self.max_pages}]: {current_url}")
             
-            # Extract URLs from scripts
-            for script in scripts:
-                src = script.get_attribute("src")
-                if src and not src.startswith(('data:', 'blob:', 'javascript:')):
-                    resource_urls.add(src)
-            
-            # Extract URLs from links (CSS, etc.)
-            for link in links:
-                href = link.get_attribute("href")
-                rel = link.get_attribute("rel")
-                if href and not href.startswith(('data:', 'blob:', 'javascript:')):
-                    resource_urls.add(href)
-            
-            # Extract URLs from images
-            for img in images:
-                src = img.get_attribute("src")
-                if src and not src.startswith(('data:', 'blob:', 'javascript:')):
-                    resource_urls.add(src)
-            
-            print(f"    🔍 Selenium found {len(resource_urls)} resources")
-            
-            # Download all resources
-            successful = 0
-            for i, resource_url in enumerate(resource_urls):
-                if resource_url in downloaded_content['assets']:
-                    continue
-                    
-                name = os.path.basename(resource_url) or resource_url[:50]
-                print(f"    [{i+1}/{len(resource_urls)}] Downloading: {name}")
+            # Download the page
+            page_data = self.download_page(current_url)
+            if page_data:
+                downloaded_content['pages'][current_url] = page_data
+                crawled_pages += 1
                 
-                # FIX: Use download_resource_aggressive instead of download_resource
-                asset_data = self.download_resource_aggressive(resource_url)
-                if asset_data:
-                    downloaded_content['assets'][resource_url] = asset_data
-                    successful += 1
-            
-            print(f"    ✅ Selenium downloaded: {successful}/{len(resource_urls)} assets")
-            
+                # Extract links from this page for further crawling
+                new_links = self.extract_all_links(page_data['content'], current_url)
+                for link in new_links:
+                    if link not in self.visited_urls:
+                        self.visited_urls.add(link)
+                        self.pages_to_crawl.append(link)
+                        print(f"    🔗 Found new page: {link}")
+                
+                # Download resources for this page
+                self.download_all_resources_aggressive(page_data['content'], current_url, downloaded_content)
+                
+                # Respect crawl delay
+                time.sleep(self.crawl_delay)
+            else:
+                print(f"    ❌ Failed to download: {current_url}")
+        
+        print(f"✅ Crawl complete: {crawled_pages} pages downloaded")
+
+    def download_page(self, url):
+        """Download a single page"""
+        try:
+            response = self.session.get(url, timeout=30)
+            if response.status_code == 200:
+                return {
+                    'url': response.url,
+                    'content': response.text,
+                    'content_type': response.headers.get('content-type', 'text/html'),
+                    'status_code': 200,
+                    'downloaded_with': 'session'
+                }
+            else:
+                print(f"    ⚠️ HTTP {response.status_code} for {url}")
+                return None
         except Exception as e:
-            print(f"    ❌ Selenium extraction error: {e}")
+            print(f"    ❌ Error downloading {url}: {e}")
+            return None
 
     def download_all_resources_aggressive(self, html, base_url, downloaded_content):
         """Aggressively download ALL resources including from CDNs"""
@@ -203,7 +232,7 @@ class AdvancedWebsiteDownloader:
                 for url in urls:
                     all_resource_urls.add(url)
         
-        print(f"    📦 Found {len(all_resource_urls)} resources in HTML")
+        print(f"    📦 Found {len(all_resource_urls)} resources in page")
         
         # Download ALL resources (no skipping!)
         successful = 0
@@ -226,7 +255,6 @@ class AdvancedWebsiteDownloader:
     def download_resource_aggressive(self, url):
         """Download resource with aggressive retry and no skipping"""
         try:
-            print(f"      🌐 Downloading: {url}")
             response = self.session.get(url, timeout=10, stream=True)
             if response.status_code == 200:
                 content_type = response.headers.get('content-type', '').lower()
@@ -258,8 +286,8 @@ class AdvancedWebsiteDownloader:
             return None
 
     def download_with_session(self, url):
-        """Download using captured session"""
-        print("⬇️ Downloading with session...")
+        """Download using captured session - NOW WITH CRAWLING"""
+        print("⬇️ Downloading with session and crawling...")
         
         downloaded_content = {
             'main_url': url,
@@ -268,39 +296,14 @@ class AdvancedWebsiteDownloader:
             'timestamp': time.time(),
         }
         
-        # Download main page
-        try:
-            print("    📄 Downloading main page...")
-            response = self.session.get(url, timeout=30)
-            if response.status_code == 200:
-                main_page_data = {
-                    'url': response.url,
-                    'content': response.text,
-                    'content_type': response.headers.get('content-type', 'text/html'),
-                    'status_code': 200,
-                    'downloaded_with': 'session'
-                }
-                downloaded_content['pages'][url] = main_page_data
-                downloaded_content['pages'][response.url] = main_page_data
-                print(f"    ✅ Main page from {response.url}")
-                
-                # Download ALL resources aggressively
-                self.download_all_resources_aggressive(response.text, response.url, downloaded_content)
-                
-            else:
-                print(f"    ❌ Main page: {response.status_code}")
-                return None
-        except Exception as e:
-            print(f"    ❌ Main page error: {e}")
-            return None
+        # Reset crawling state
+        self.visited_urls.clear()
+        self.pages_to_crawl.clear()
         
-        # Use Selenium to get even more resources from the live page
-        if self.driver:
-            try:
-                self.download_with_selenium(url, downloaded_content)
-            except Exception as e:
-                print(f"    ⚠️ Selenium download failed: {e}")
+        # Start crawling from the main URL
+        self.crawl_website(url, downloaded_content)
         
+        print(f"    📊 Total pages downloaded: {len(downloaded_content['pages'])}")
         print(f"    📊 Total assets downloaded: {len(downloaded_content['assets'])}")
         
         # Save file
@@ -337,7 +340,6 @@ class AdvancedWebsiteDownloader:
                 # Assets - FIXED: Save as individual JSON files in assets folder
                 for url, data in content['assets'].items():
                     hash_val = hashlib.md5(url.encode()).hexdigest()[:10]
-                    filename = data.get('filename', 'resource')
                     # Save each asset as a separate JSON file
                     zipf.writestr(f"assets/{hash_val}.json", json.dumps(data, indent=2))
             
@@ -357,7 +359,7 @@ class AdvancedWebsiteDownloader:
             print("❌ Failed to setup Chrome session")
             return None
         
-        # Download with session
+        # Download with session AND CRAWLING
         result = self.download_with_session(url)
         
         # Cleanup
@@ -402,9 +404,9 @@ class AdvancedWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*50)
-    print("🚀 FIXED WEBSITE DOWNLOADER - PROPER ASSET SAVING")
-    print("📥 Downloads ALL CSS, JS, Images and saves them correctly!")
-    print("🌐 Works with Discord and other complex sites")
+    print("🚀 ADVANCED WEBSITE DOWNLOADER - WITH CRAWLING")
+    print("📥 Downloads ALL pages, CSS, JS, Images!")
+    print("🌐 Works with complex sites and follows links")
     print("="*50)
     
     sites = [
@@ -423,7 +425,7 @@ if __name__ == "__main__":
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded sites with ALL assets")
-        print("💡 Now run the browser.py to view your downloaded sites with proper styling!")
+        print(f"\n🎉 Success! Downloaded sites with ALL pages and assets")
+        print("💡 Now run the browser.py to view your downloaded sites!")
     else:
         print(f"\n❌ No sites downloaded")
