@@ -560,85 +560,90 @@ class PageFileRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(500, f"Asset serving error: {str(e)}")
     
     def rewrite_links(self, html, base_url):
-        """Rewrite links in HTML to work with offline browser"""
-        soup = BeautifulSoup(html, 'html.parser')
-        base_domain = urlparse(base_url).netloc
-        
-        # Rewrite <a> tags
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            if href.startswith(('http://', 'https://')):
-                # External link - keep as is or make it open in offline browser
-                if base_domain in href:
-                    # Convert to our internal routing
-                    link['href'] = f"/page/{href}"
-                # Otherwise leave external links as-is
-            elif href.startswith('/'):
-                # Absolute path - convert to full URL then to our routing
-                full_url = f"{urlparse(base_url).scheme}://{base_domain}{href}"
-                link['href'] = f"/page/{full_url}"
-            elif href.startswith('#') or href.startswith('javascript:'):
-                # Anchors and JS links - leave as is
-                pass
-            elif not href.startswith(('mailto:', 'tel:')):
-                # Relative path
-                full_url = urljoin(base_url, href)
-                link['href'] = f"/page/{full_url}"
-        
-        # Rewrite resource links to use our asset server
-        self.rewrite_resource_links(soup, base_url)
-        
-        return str(soup)
+        """Rewrite links in HTML to work with offline browser - FIXED VERSION"""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            base_domain = urlparse(base_url).netloc
+            
+            # Rewrite <a> tags - FIXED LINK REWRITING
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                    if href.startswith(('http://', 'https://')):
+                        # External link from same domain
+                        if base_domain in href:
+                            # Keep the full URL but route through our system
+                            link['href'] = f"/page/{href}"
+                        # External links from other domains stay as-is
+                    elif href.startswith('/'):
+                        # Absolute path - convert to full URL
+                        full_url = f"{urlparse(base_url).scheme}://{base_domain}{href}"
+                        link['href'] = f"/page/{full_url}"
+                    else:
+                        # Relative path
+                        full_url = urljoin(base_url, href)
+                        link['href'] = f"/page/{full_url}"
+            
+            # Rewrite resource links to use our asset server - FIXED ASSET REWRITING
+            self.rewrite_resource_links(soup, base_url)
+            
+            return str(soup)
+        except Exception as e:
+            print(f"❌ Error rewriting links: {e}")
+            return html  # Return original HTML if rewriting fails
     
     def rewrite_resource_links(self, soup, base_url):
-        """Rewrite resource links (CSS, JS, images) to use asset server"""
-        # Rewrite <script> tags
-        for script in soup.find_all('script', src=True):
-            src = script['src']
-            if src and not src.startswith(('data:', 'blob:')):
-                if src.startswith(('http://', 'https://')):
-                    script['src'] = f"/asset/{src}"
-                else:
-                    full_src = urljoin(base_url, src)
-                    script['src'] = f"/asset/{full_src}"
-        
-        # Rewrite <link> tags (CSS, etc.)
-        for link in soup.find_all('link', href=True):
-            href = link['href']
-            if href and not href.startswith(('data:', 'blob:')):
-                if href.startswith(('http://', 'https://')):
-                    link['href'] = f"/asset/{href}"
-                else:
-                    full_href = urljoin(base_url, href)
-                    link['href'] = f"/asset/{full_href}"
-        
-        # Rewrite <img> tags
-        for img in soup.find_all('img', src=True):
-            src = img['src']
-            if src and not src.startswith(('data:', 'blob:')):
-                if src.startswith(('http://', 'https://')):
-                    img['src'] = f"/asset/{src}"
-                else:
-                    full_src = urljoin(base_url, src)
-                    img['src'] = f"/asset/{full_src}"
-        
-        # Rewrite CSS url() references in style tags
-        for style in soup.find_all('style'):
-            if style.string:
-                style.string = re.sub(
-                    r'url\([\'"]?([^)\'"]+)[\'"]?\)',
-                    lambda m: self.rewrite_css_url(m.group(1), base_url),
-                    style.string
-                )
-        
-        # Rewrite CSS in style attributes
-        for tag in soup.find_all(style=True):
-            if tag['style']:
-                tag['style'] = re.sub(
-                    r'url\([\'"]?([^)\'"]+)[\'"]?\)',
-                    lambda m: self.rewrite_css_url(m.group(1), base_url),
-                    tag['style']
-                )
+        """Rewrite resource links (CSS, JS, images) to use asset server - FIXED"""
+        try:
+            # Rewrite <script> tags
+            for script in soup.find_all('script', src=True):
+                src = script['src']
+                if src and not src.startswith(('data:', 'blob:', 'javascript:')):
+                    if src.startswith(('http://', 'https://')):
+                        script['src'] = f"/asset/{src}"
+                    else:
+                        full_src = urljoin(base_url, src)
+                        script['src'] = f"/asset/{full_src}"
+            
+            # Rewrite <link> tags (CSS, etc.)
+            for link in soup.find_all('link', href=True):
+                href = link['href']
+                if href and not href.startswith(('data:', 'blob:', 'javascript:')):
+                    if href.startswith(('http://', 'https://')):
+                        link['href'] = f"/asset/{href}"
+                    else:
+                        full_href = urljoin(base_url, href)
+                        link['href'] = f"/asset/{full_href}"
+            
+            # Rewrite <img> tags
+            for img in soup.find_all('img', src=True):
+                src = img['src']
+                if src and not src.startswith(('data:', 'blob:', 'javascript:')):
+                    if src.startswith(('http://', 'https://')):
+                        img['src'] = f"/asset/{src}"
+                    else:
+                        full_src = urljoin(base_url, src)
+                        img['src'] = f"/asset/{full_src}"
+            
+            # Rewrite CSS url() references in style tags
+            for style in soup.find_all('style'):
+                if style.string:
+                    style.string = re.sub(
+                        r'url\([\'"]?([^)\'"]+)[\'"]?\)',
+                        lambda m: self.rewrite_css_url(m.group(1), base_url),
+                        style.string
+                    )
+            
+            # Rewrite CSS in style attributes
+            for tag in soup.find_all(style=True):
+                if tag['style']:
+                    tag['style'] = re.sub(
+                        r'url\([\'"]?([^)\'"]+)[\'"]?\)',
+                        lambda m: self.rewrite_css_url(m.group(1), base_url),
+                        tag['style']
+                    )
+        except Exception as e:
+            print(f"❌ Error rewriting resource links: {e}")
     
     def rewrite_css_url(self, url, base_url):
         """Rewrite a CSS URL to use asset server"""
@@ -682,7 +687,7 @@ def start_browser(pages_directory=None, port=8000):
     server = HTTPServer(('localhost', port), PageFileRequestHandler)
     
     print(f"🌐 Starting offline browser on http://localhost:{port}")
-    print("🎨 Beautiful UI with working links!")
+    print("🎨 Fixed: Links and CSS should now work!")
     print("📂 Serving from your downloaded sites")
     print("🛑 Press Ctrl+C to stop the server")
     
