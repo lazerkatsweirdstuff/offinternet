@@ -39,9 +39,9 @@ class CompleteWebsiteDownloader:
         self.visited_urls = set()
         self.pages_to_crawl = deque()
         self.failed_urls = set()
-        self.max_pages = 10  # Increased limit
+        self.max_pages = 10
         self.crawl_delay = random.uniform(1, 2)
-        self.max_retries = 3  # More retries
+        self.max_retries = 3
         
         # Asset type priorities
         self.critical_assets = ['.css', '.js']
@@ -51,6 +51,99 @@ class CompleteWebsiteDownloader:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
             print(f"✅ Created directory: {self.output_dir}")
+
+    def is_valid_url(self, url):
+        """RELAXED URL validation - only filter obvious junk"""
+        if not url or not isinstance(url, str):
+            return False
+            
+        # Skip obviously invalid URLs - MUCH MORE PERMISSIVE
+        obvious_junk_patterns = [
+            r'^[a-f0-9]{64}$',  # SHA256 hashes
+            r'^[a-f0-9]{40}$',  # SHA1 hashes  
+            r'^[a-zA-Z0-9+/]{40,}={0,2}$',  # Long base64 strings
+            r'^[\w\s-]+\s+[\w\s-]+$',  # Plain text with spaces (like "width=device-width")
+            r'^:[\w]+\(.*\)$',  # Rails-style routes like ":solution(.:format)"
+            r'^@\w+$',  # Twitter handles
+        ]
+        
+        for pattern in obvious_junk_patterns:
+            if re.match(pattern, url.strip()):
+                return False
+        
+        # Must have a valid scheme and netloc for HTTP URLs
+        try:
+            parsed = urlparse(url)
+            
+            # Skip data URLs and javascript
+            if parsed.scheme in ['data', 'javascript', 'mailto', 'tel']:
+                return False
+                
+            # For HTTP URLs, require netloc
+            if parsed.scheme in ['http', 'https']:
+                if not parsed.netloc:
+                    return False
+                    
+            return True
+            
+        except Exception:
+            return False
+
+    def is_likely_asset_url(self, url):
+        """Check if URL is likely a downloadable asset - MORE PERMISSIVE"""
+        # Always allow URLs with common file extensions
+        valid_extensions = self.critical_assets + self.important_assets + self.other_assets
+        
+        # Check file extensions
+        if any(url.lower().endswith(ext) for ext in valid_extensions):
+            return True
+            
+        # Check common asset patterns
+        asset_patterns = [
+            r'\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|ttf|webp)(\?.*)?$',
+            r'/static/',
+            r'/assets/',
+            r'/images/',
+            r'/fonts/',
+            r'/css/',
+            r'/js/',
+            r'\.min\.(js|css)',
+        ]
+        
+        # If it passes basic URL validation and looks like a resource, allow it
+        if any(re.search(pattern, url, re.IGNORECASE) for pattern in asset_patterns):
+            return True
+            
+        # For CSS Zen Garden specifically, be more permissive
+        if 'csszengarden.com' in url:
+            return True
+            
+        return False
+
+    def should_download_url(self, url):
+        """Main decision function for whether to download a URL"""
+        if not self.is_valid_url(url):
+            return False
+            
+        # Always download pages
+        if any(url.endswith(ext) for ext in ['', '.html', '.htm', '.php', '.aspx']):
+            return True
+            
+        # Download assets
+        if self.is_likely_asset_url(url):
+            return True
+            
+        # For URLs we're unsure about, check if they look like web resources
+        try:
+            parsed = urlparse(url)
+            if parsed.path and '.' in parsed.path:  # Has a file extension
+                return True
+            if parsed.query:  # Has query parameters (common in assets)
+                return True
+        except:
+            pass
+            
+        return False
 
     def update_session_headers(self):
         """Update session headers with random user agent"""
@@ -66,7 +159,7 @@ class CompleteWebsiteDownloader:
         self.session.headers.update(headers)
 
     def setup_chrome_complete(self):
-        """Setup Chrome for complete asset capture with enhanced capabilities"""
+        """Setup Chrome for complete asset capture"""
         try:
             chrome_options = Options()
             chrome_options.add_argument("--incognito")
@@ -95,7 +188,7 @@ class CompleteWebsiteDownloader:
             return False
 
     def manual_cloudflare_solve(self, url):
-        """Enhanced manual Cloudflare solving"""
+        """Manual Cloudflare solving"""
         print("🚨 CLOUDFLARE SOLVER")
         print("="*50)
         
@@ -132,14 +225,6 @@ class CompleteWebsiteDownloader:
                 self.session.cookies.set(cookie['name'], cookie['value'])
             
             print(f"✅ Captured {len(cookies)} cookies")
-            
-            # Also capture local storage
-            try:
-                local_storage = self.driver.execute_script("return window.localStorage;")
-                print(f"✅ Captured {len(local_storage)} local storage items")
-            except:
-                print("⚠️ Could not capture local storage")
-            
             return True
             
         except Exception as e:
@@ -147,7 +232,7 @@ class CompleteWebsiteDownloader:
             return False
 
     def extract_all_links_complete(self, html, base_url):
-        """Extract ALL links for comprehensive crawling with enhanced discovery"""
+        """Extract ALL links for comprehensive crawling"""
         soup = BeautifulSoup(html, 'html.parser')
         links = set()
         base_domain = urlparse(base_url).netloc
@@ -159,19 +244,8 @@ class CompleteWebsiteDownloader:
                 full_url = urljoin(base_url, href)
                 clean_url = self.clean_url(full_url)
                 
-                if self.is_valid_internal_url(clean_url, base_domain):
+                if self.is_valid_internal_url(clean_url, base_domain) and self.should_download_url(clean_url):
                     links.add(clean_url)
-        
-        # Also extract from meta tags, scripts, etc.
-        for meta in soup.find_all('meta', content=True):
-            content = meta.get('content', '')
-            if 'url=' in content.lower():
-                url_match = re.search(r'url=([^"\'&]+)', content)
-                if url_match:
-                    full_url = urljoin(base_url, url_match.group(1))
-                    clean_url = self.clean_url(full_url)
-                    if self.is_valid_internal_url(clean_url, base_domain):
-                        links.add(clean_url)
         
         return links
 
@@ -183,21 +257,7 @@ class CompleteWebsiteDownloader:
         if base_domain not in url:
             return False
             
-        if self.is_likely_junk(url):
-            return False
-            
         return True
-
-    def is_likely_junk(self, url):
-        """Enhanced junk URL filtering"""
-        junk_patterns = [
-            '/cdn-cgi/', '/wp-admin/', '/wp-json/', '/administrator/', 
-            '.pdf', '.zip', '.exe', '.dmg', '.tar.gz',
-            '/api/', '/ajax/', '/graphql', '/websocket', '/.well-known/',
-            'logout', 'signout', 'delete', 'remove'
-        ]
-        url_lower = url.lower()
-        return any(pattern in url_lower for pattern in junk_patterns)
 
     def clean_url(self, url):
         """Clean URL but keep important parameters"""
@@ -210,7 +270,11 @@ class CompleteWebsiteDownloader:
             return url
 
     def download_with_retry_complete(self, url, retry_count=0, method='get', data=None):
-        """Enhanced download with complete retry logic and multiple methods"""
+        """Enhanced download with complete retry logic"""
+        if not self.should_download_url(url):
+            print(f"    🚫 Skipping URL (filtered): {url}")
+            return None
+            
         if retry_count >= self.max_retries:
             self.failed_urls.add(url)
             return None
@@ -230,7 +294,6 @@ class CompleteWebsiteDownloader:
                 return response
             elif response.status_code == 403:
                 print(f"    🚫 403 Forbidden: {url}")
-                # Try with different approach
                 return self.try_alternative_download(url, retry_count)
             elif response.status_code == 429:
                 wait_time = 15 + (retry_count * 10)
@@ -255,9 +318,8 @@ class CompleteWebsiteDownloader:
         print(f"    🔄 Trying alternative download for: {url}")
         
         # Method 1: Try with Selenium if available
-        if self.driver and url == self.driver.current_url:
+        if self.driver:
             try:
-                # Use JavaScript to fetch the resource
                 js_fetch = f"""
                 fetch('{url}').then(r => r.text()).then(t => window.fetchedContent = t);
                 """
@@ -265,7 +327,6 @@ class CompleteWebsiteDownloader:
                 time.sleep(2)
                 content = self.driver.execute_script("return window.fetchedContent || ''")
                 if content:
-                    # Create a mock response
                     class MockResponse:
                         def __init__(self, content):
                             self.content = content.encode('utf-8')
@@ -275,22 +336,6 @@ class CompleteWebsiteDownloader:
                     return MockResponse(content)
             except:
                 pass
-        
-        # Method 2: Try with different headers
-        original_headers = self.session.headers.copy()
-        try:
-            self.session.headers.update({
-                'Accept': '*/*',
-                'Referer': self.driver.current_url if self.driver else url,
-                'Sec-Fetch-Dest': 'document' if url.endswith(('.html', '.htm')) else 'style' if url.endswith('.css') else 'script' if url.endswith('.js') else 'image'
-            })
-            response = self.session.get(url, timeout=15)
-            if response.status_code == 200:
-                return response
-        except:
-            pass
-        finally:
-            self.session.headers.update(original_headers)
         
         return self.download_with_retry_complete(url, retry_count + 1)
 
@@ -390,9 +435,13 @@ class CompleteWebsiteDownloader:
         return None
 
     def download_asset_complete(self, url):
-        """Enhanced asset download with better error handling and content processing"""
+        """Enhanced asset download with better URL validation"""
+        # Skip URLs that shouldn't be downloaded
+        if not self.should_download_url(url):
+            print(f"      🚫 Skipping filtered URL: {url}")
+            return None
+            
         try:
-            # Special handling for different file types
             if any(url.endswith(ext) for ext in self.critical_assets):
                 # Critical assets - be more persistent
                 response = self.download_with_retry_complete(url)
@@ -441,7 +490,6 @@ class CompleteWebsiteDownloader:
             # Additional processing for images
             if 'image' in content_type:
                 try:
-                    # Try to optimize image info
                     img = Image.open(io.BytesIO(content))
                     asset_info = {
                         'format': img.format,
@@ -487,7 +535,7 @@ class CompleteWebsiteDownloader:
             }
 
     def extract_assets_from_html(self, html, base_url):
-        """Extract ALL possible assets from HTML with enhanced discovery"""
+        """Extract ALL possible assets from HTML - MORE PERMISSIVE"""
         soup = BeautifulSoup(html, 'html.parser')
         assets = set()
         
@@ -503,7 +551,7 @@ class CompleteWebsiteDownloader:
             ('iframe', 'src'),
             ('embed', 'src'),
             ('object', 'data'),
-            ('meta', 'content'),  # For og:image etc.
+            ('meta', 'content'),
         ]
         
         for tag, attr in tags_attrs:
@@ -516,10 +564,12 @@ class CompleteWebsiteDownloader:
                             src_url = src_entry.strip().split(' ')[0]
                             if src_url:
                                 full_url = urljoin(base_url, src_url)
-                                assets.add(full_url)
+                                if self.should_download_url(full_url):
+                                    assets.add(full_url)
                     else:
                         full_url = urljoin(base_url, attr_value)
-                        assets.add(full_url)
+                        if self.should_download_url(full_url):
+                            assets.add(full_url)
         
         # Extract from inline styles and JavaScript
         for style in soup.find_all('style'):
@@ -537,23 +587,19 @@ class CompleteWebsiteDownloader:
                     urls = re.findall(r'url\([\'"]?([^)"\']+)[\'"]?\)', tag.get(attr))
                     for url in urls:
                         full_url = urljoin(base_url, url)
-                        assets.add(full_url)
+                        if self.should_download_url(full_url):
+                            assets.add(full_url)
         
         return assets
 
     def extract_urls_from_css(self, css_text, base_url):
-        """Extract URLs from CSS text with enhanced patterns"""
+        """Extract URLs from CSS text - MORE PERMISSIVE"""
         urls = set()
         
         patterns = [
             r'url\([\'"]?([^)"\']+)[\'"]?\)',
             r'@import\s+[\'"]([^\'"]+)[\'"]',
             r'src:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'@font-face\s*\{[^}]*src:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'background-image:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'content:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'list-style-image:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'cursor:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
         ]
         
         for pattern in patterns:
@@ -562,15 +608,15 @@ class CompleteWebsiteDownloader:
                 url = match.strip()
                 if url and not url.startswith(('data:', 'blob:')):
                     full_url = urljoin(base_url, url)
-                    urls.add(full_url)
+                    if self.should_download_url(full_url):
+                        urls.add(full_url)
         
         return urls
 
     def extract_urls_from_js(self, js_text, base_url):
-        """Extract URLs from JavaScript text"""
+        """Extract URLs from JavaScript text - MORE PERMISSIVE"""
         urls = set()
         
-        # Common patterns for URLs in JavaScript
         patterns = [
             r'[\'\"](https?://[^\'\"]+)[\'\"]',
             r'[\'\"](/[^\'\"]+)[\'\"]',
@@ -584,7 +630,8 @@ class CompleteWebsiteDownloader:
                 url = match[0] if isinstance(match, tuple) else match
                 if url and not url.startswith(('data:', 'blob:', 'javascript:')):
                     full_url = urljoin(base_url, url)
-                    urls.add(full_url)
+                    if self.should_download_url(full_url):
+                        urls.add(full_url)
         
         return urls
 
@@ -597,42 +644,36 @@ class CompleteWebsiteDownloader:
             selenium_assets = self.get_selenium_network_requests()
             assets.update(selenium_assets)
         
-        print(f"    📦 Found {len(assets)} total assets")
+        print(f"    📦 Found {len(assets)} potential assets")
         
-        # Prioritize assets
-        critical_assets = [a for a in assets if any(a.endswith(ext) for ext in self.critical_assets)]
-        important_assets = [a for a in assets if any(a.endswith(ext) for ext in self.important_assets)]
-        other_assets = [a for a in assets if any(a.endswith(ext) for ext in self.other_assets)]
-        remaining_assets = assets - set(critical_assets) - set(important_assets) - set(other_assets)
-        
-        # Download in priority order
+        if not assets:
+            print("    ℹ️ No assets found to download")
+            return
+            
+        # Download all assets that pass our filters
         successful = 0
         total_assets = len(assets)
         
-        for i, asset_group in enumerate([critical_assets, important_assets, other_assets, remaining_assets]):
-            group_name = ['CRITICAL', 'IMPORTANT', 'OTHER', 'REMAINING'][i]
-            print(f"    🎯 Downloading {group_name} assets ({len(asset_group)} items)")
+        for j, asset_url in enumerate(assets):
+            if asset_url in downloaded_content['assets'] or asset_url in self.failed_urls:
+                continue
             
-            for j, asset_url in enumerate(asset_group):
-                if asset_url in downloaded_content['assets'] or asset_url in self.failed_urls:
-                    continue
+            filename = os.path.basename(urlparse(asset_url).path) or asset_url[:60]
+            print(f"      📁 [{successful+1}/{total_assets}] {filename}")
+            
+            asset_data = self.download_asset_complete(asset_url)
+            if asset_data:
+                downloaded_content['assets'][asset_url] = asset_data
+                successful += 1
                 
-                filename = os.path.basename(asset_url) or asset_url[:60]
-                print(f"      📁 [{successful+1}/{total_assets}] {group_name}: {filename}")
-                
-                asset_data = self.download_asset_complete(asset_url)
-                if asset_data:
-                    downloaded_content['assets'][asset_url] = asset_data
-                    successful += 1
-                    
-                    # Process CSS files for nested assets
-                    if asset_url.endswith('.css'):
-                        self.download_css_assets(asset_data, asset_url, downloaded_content)
-                else:
-                    print(f"      ❌ Failed: {filename}")
-                    self.failed_urls.add(asset_url)
-                
-                time.sleep(0.1)  # Small delay between downloads
+                # Process CSS files for nested assets
+                if asset_url.endswith('.css'):
+                    self.download_css_assets(asset_data, asset_url, downloaded_content)
+            else:
+                print(f"      ❌ Failed: {filename}")
+                self.failed_urls.add(asset_url)
+            
+            time.sleep(0.1)
         
         print(f"    ✅ Downloaded: {successful}/{total_assets} assets")
 
@@ -649,7 +690,7 @@ class CompleteWebsiteDownloader:
                     if message_type == 'Network.responseReceived':
                         response = message['message']['params']['response']
                         url = response.get('url', '')
-                        if url and not url.startswith('data:'):
+                        if url and self.should_download_url(url):
                             assets.add(url)
                 except:
                     continue
@@ -659,7 +700,7 @@ class CompleteWebsiteDownloader:
         return assets
 
     def download_css_assets(self, css_asset, css_url, downloaded_content):
-        """Download assets referenced in CSS files with enhanced processing"""
+        """Download assets referenced in CSS files"""
         try:
             css_content = css_asset['content']
             
@@ -678,33 +719,17 @@ class CompleteWebsiteDownloader:
                 for encoding, name in decoding_methods:
                     try:
                         css_text = css_content.decode(encoding)
-                        print(f"      🔍 CSS decoded as {name}")
                         break
                     except UnicodeDecodeError:
                         continue
-                
-                # If text decoding fails, try gzip
-                if not css_text:
-                    try:
-                        if css_content[:2] == b'\x1f\x8b':
-                            css_text = gzip.decompress(css_content).decode('utf-8')
-                            print("      🔍 Decompressed gzipped CSS")
-                    except:
-                        pass
-                
-                # Final fallback - process as binary
-                if not css_text:
-                    css_text = self.process_binary_css(css_content)
             else:
                 css_text = css_content
             
             if not css_text:
-                print("      ⚠️ Could not extract text from CSS, skipping asset extraction")
                 return
             
             # Extract and download referenced assets
             css_assets = self.extract_urls_from_css(css_text, css_url)
-            print(f"      🔍 CSS references {len(css_assets)} assets")
             
             for asset_url in css_assets:
                 if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls:
@@ -715,20 +740,6 @@ class CompleteWebsiteDownloader:
             
         except Exception as e:
             print(f"      ⚠️ CSS asset download error: {e}")
-
-    def process_binary_css(self, css_content):
-        """Enhanced binary CSS processing"""
-        try:
-            # Try to extract URLs directly from binary
-            content_str = str(css_content)
-            urls = re.findall(r'url\([^)]+\)', content_str)
-            if urls:
-                print(f"      🔍 Found {len(urls)} URLs in binary CSS")
-                return content_str
-            return None
-        except Exception as e:
-            print(f"      ⚠️ Binary CSS processing failed: {e}")
-            return None
 
     def final_asset_discovery(self, downloaded_content):
         """Final pass to discover missing assets"""
@@ -754,7 +765,7 @@ class CompleteWebsiteDownloader:
                         downloaded_content['assets'][asset_url] = asset_data
 
     def download_website(self, url):
-        """Main download method with enhanced error handling"""
+        """Main download method"""
         print(f"⬇️ Target: {url}")
         
         # Manual Cloudflare solve
@@ -773,15 +784,15 @@ class CompleteWebsiteDownloader:
         return result
 
     def download_with_session_complete(self, url):
-        """Download using complete approach with enhanced asset capture"""
-        print("⬇️ Downloading with ENHANCED COMPLETE asset capture...")
+        """Download using complete approach"""
+        print("⬇️ Downloading with RELAXED URL FILTERING...")
         
         downloaded_content = {
             'main_url': url,
             'pages': {},
             'assets': {},
             'timestamp': time.time(),
-            'version': '2.0_enhanced'
+            'version': '2.2_relaxed_filters'
         }
         
         # Reset state
@@ -795,21 +806,16 @@ class CompleteWebsiteDownloader:
         # Statistics
         total_pages = len(downloaded_content['pages'])
         total_assets = len(downloaded_content['assets'])
-        css_count = sum(1 for asset_url in downloaded_content['assets'] if asset_url.endswith('.css'))
-        js_count = sum(1 for asset_url in downloaded_content['assets'] if asset_url.endswith('.js'))
-        image_count = sum(1 for asset_url in downloaded_content['assets'] if any(asset_url.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']))
+        failed_count = len(self.failed_urls)
         
         print(f"    📊 Final Statistics:")
         print(f"    📄 Total pages: {total_pages}")
         print(f"    📦 Total assets: {total_assets}")
-        print(f"    🎨 CSS files: {css_count}")
-        print(f"    ⚙️ JavaScript files: {js_count}")
-        print(f"    🖼️ Images: {image_count}")
-        print(f"    ❌ Failed URLs: {len(self.failed_urls)}")
+        print(f"    ❌ Failed URLs: {failed_count}")
         
         # Save file
         domain = urlparse(url).netloc.replace(':', '_')
-        filename = f"{domain}_ENHANCED_{int(time.time())}.page"
+        filename = f"{domain}_RELAXED_{int(time.time())}.page"
         filepath = os.path.join(self.output_dir, filename)
         
         if self.save_page_file(filepath, downloaded_content):
@@ -820,7 +826,7 @@ class CompleteWebsiteDownloader:
             return None
 
     def save_page_file(self, filepath, content):
-        """Save as .page file with enhanced metadata"""
+        """Save as .page file"""
         try:
             with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 # Enhanced metadata
@@ -830,10 +836,6 @@ class CompleteWebsiteDownloader:
                     'version': content['version'],
                     'pages': len(content['pages']),
                     'assets': len(content['assets']),
-                    'css_files': sum(1 for url in content['assets'] if url.endswith('.css')),
-                    'js_files': sum(1 for url in content['assets'] if url.endswith('.js')),
-                    'image_files': sum(1 for url in content['assets'] if any(url.endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'])),
-                    'total_size': sum(len(asset['content']) for asset in content['assets'].values()),
                     'failed_urls': list(self.failed_urls)
                 }
                 zipf.writestr('metadata.json', json.dumps(metadata, indent=2))
@@ -856,10 +858,10 @@ class CompleteWebsiteDownloader:
             return False
 
     def download_from_list(self, url_list):
-        """Download multiple sites with enhanced reporting"""
+        """Download multiple sites"""
         downloaded_files = []
         
-        print(f"🎯 Downloading {len(url_list)} sites with ENHANCED COMPLETE assets...")
+        print(f"🎯 Downloading {len(url_list)} sites with RELAXED FILTERS...")
         print(f"📁 Output: {self.output_dir}")
         
         for i, url in enumerate(url_list, 1):
@@ -895,9 +897,9 @@ class CompleteWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*60)
-    print("🚀 ENHANCED COMPLETE WEBSITE DOWNLOADER")
-    print("📥 Grabs EVERY asset with multiple fallback approaches")
-    print("🛡️ Enhanced error recovery and asset discovery")
+    print("🚀 RELAXED WEBSITE DOWNLOADER - PERMISSIVE URL FILTERING")
+    print("📥 Downloads most URLs, only filters obvious junk")
+    print("🛡️ Better for sites like CSS Zen Garden")
     print("="*60)
     
     # Install required packages if not present
@@ -921,7 +923,7 @@ if __name__ == "__main__":
         from PIL import Image
     
     sites = [
-        "https://discord.com",
+        "https://csszengarden.com/220/",
     ]
     
     if len(sys.argv) > 1:
@@ -935,7 +937,7 @@ if __name__ == "__main__":
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded sites with COMPLETE CSS and assets!")
+        print(f"\n🎉 Success! Downloaded sites with relaxed filtering!")
         print("💡 Now run the browser.py to view your downloaded sites!")
     else:
         print(f"\n❌ No sites downloaded")
