@@ -48,9 +48,6 @@ class CompleteWebsiteDownloader:
         self.important_assets = ['.png', '.jpg', '.jpeg', '.svg', '.ico', '.woff', '.woff2', '.ttf']
         self.other_assets = ['.gif', '.webp', '.mp4', '.webm', '.json', '.xml']
         
-        # Track already checked common assets to avoid duplicates
-        self.checked_common_assets = set()
-        
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
             print(f"✅ Created directory: {self.output_dir}")
@@ -60,13 +57,13 @@ class CompleteWebsiteDownloader:
         if not url or not isinstance(url, str):
             return False
             
-        # Skip obviously invalid URLs
+        # Skip obviously invalid URLs - MUCH MORE PERMISSIVE
         obvious_junk_patterns = [
             r'^[a-f0-9]{64}$',  # SHA256 hashes
             r'^[a-f0-9]{40}$',  # SHA1 hashes  
             r'^[a-zA-Z0-9+/]{40,}={0,2}$',  # Long base64 strings
-            r'^[\w\s-]+\s+[\w\s-]+$',  # Plain text with spaces
-            r'^:[\w]+\(.*\)$',  # Rails-style routes
+            r'^[\w\s-]+\s+[\w\s-]+$',  # Plain text with spaces (like "width=device-width")
+            r'^:[\w]+\(.*\)$',  # Rails-style routes like ":solution(.:format)"
             r'^@\w+$',  # Twitter handles
         ]
         
@@ -93,7 +90,7 @@ class CompleteWebsiteDownloader:
             return False
 
     def is_likely_asset_url(self, url):
-        """Check if URL is likely a downloadable asset"""
+        """Check if URL is likely a downloadable asset - MORE PERMISSIVE"""
         # Always allow URLs with common file extensions
         valid_extensions = self.critical_assets + self.important_assets + self.other_assets
         
@@ -115,6 +112,10 @@ class CompleteWebsiteDownloader:
         
         # If it passes basic URL validation and looks like a resource, allow it
         if any(re.search(pattern, url, re.IGNORECASE) for pattern in asset_patterns):
+            return True
+            
+        # For CSS Zen Garden specifically, be more permissive
+        if 'csszengarden.com' in url:
             return True
             
         return False
@@ -384,7 +385,7 @@ class CompleteWebsiteDownloader:
         
         print(f"✅ Crawl complete: {crawled_pages} pages")
         
-        # FINAL ASSET DISCOVERY - ONLY RUN ONCE AT THE END
+        # Final asset discovery pass
         self.final_asset_discovery(downloaded_content)
 
     def get_url_display_name(self, url):
@@ -534,7 +535,7 @@ class CompleteWebsiteDownloader:
             }
 
     def extract_assets_from_html(self, html, base_url):
-        """Extract ALL possible assets from HTML"""
+        """Extract ALL possible assets from HTML - MORE PERMISSIVE"""
         soup = BeautifulSoup(html, 'html.parser')
         assets = set()
         
@@ -592,7 +593,7 @@ class CompleteWebsiteDownloader:
         return assets
 
     def extract_urls_from_css(self, css_text, base_url):
-        """Extract URLs from CSS text"""
+        """Extract URLs from CSS text - MORE PERMISSIVE"""
         urls = set()
         
         patterns = [
@@ -613,7 +614,7 @@ class CompleteWebsiteDownloader:
         return urls
 
     def extract_urls_from_js(self, js_text, base_url):
-        """Extract URLs from JavaScript text"""
+        """Extract URLs from JavaScript text - MORE PERMISSIVE"""
         urls = set()
         
         patterns = [
@@ -741,10 +742,10 @@ class CompleteWebsiteDownloader:
             print(f"      ⚠️ CSS asset download error: {e}")
 
     def final_asset_discovery(self, downloaded_content):
-        """Final pass to discover missing assets - RUNS ONLY ONCE"""
+        """Final pass to discover missing assets"""
         print("🔍 Performing final asset discovery...")
         
-        # Check for common missing assets - ONLY CHECK UNIQUE DOMAINS
+        # Check for common missing assets
         common_assets = [
             '/favicon.ico',
             '/apple-touch-icon.png',
@@ -753,39 +754,19 @@ class CompleteWebsiteDownloader:
             '/manifest.json'
         ]
         
-        # Get unique domains from all pages to avoid duplicate checks
-        unique_domains = set()
         for page_url in downloaded_content['pages']:
-            domain = urlparse(page_url).netloc
-            unique_domains.add(domain)
-        
-        print(f"    🔍 Checking {len(unique_domains)} unique domains for common assets")
-        
-        for domain in unique_domains:
+            base_domain = urlparse(page_url).netloc
             for asset_path in common_assets:
-                asset_url = f"https://{domain}{asset_path}"
-                
-                # Skip if we've already checked this exact URL
-                if asset_url in self.checked_common_assets:
-                    continue
-                    
-                self.checked_common_assets.add(asset_url)
-                
+                asset_url = f"https://{base_domain}{asset_path}"
                 if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls:
-                    print(f"    🔎 Checking: {asset_path} on {domain}")
+                    print(f"    🔎 Checking for common asset: {asset_path}")
                     asset_data = self.download_asset_complete(asset_url)
                     if asset_data:
                         downloaded_content['assets'][asset_url] = asset_data
-                        print(f"      ✅ Found: {asset_path}")
-                    else:
-                        print(f"      ❌ Missing: {asset_path}")
 
     def download_website(self, url):
         """Main download method"""
         print(f"⬇️ Target: {url}")
-        
-        # Reset checked assets for each new website
-        self.checked_common_assets.clear()
         
         # Manual Cloudflare solve
         if not self.manual_cloudflare_solve(url):
@@ -811,7 +792,7 @@ class CompleteWebsiteDownloader:
             'pages': {},
             'assets': {},
             'timestamp': time.time(),
-            'version': '2.3_no_spam'
+            'version': '2.2_relaxed_filters'
         }
         
         # Reset state
@@ -834,7 +815,7 @@ class CompleteWebsiteDownloader:
         
         # Save file
         domain = urlparse(url).netloc.replace(':', '_')
-        filename = f"{domain}_NO_SPAM_{int(time.time())}.page"
+        filename = f"{domain}_RELAXED_{int(time.time())}.page"
         filepath = os.path.join(self.output_dir, filename)
         
         if self.save_page_file(filepath, downloaded_content):
@@ -880,7 +861,7 @@ class CompleteWebsiteDownloader:
         """Download multiple sites"""
         downloaded_files = []
         
-        print(f"🎯 Downloading {len(url_list)} sites with NO SPAM...")
+        print(f"🎯 Downloading {len(url_list)} sites with RELAXED FILTERS...")
         print(f"📁 Output: {self.output_dir}")
         
         for i, url in enumerate(url_list, 1):
@@ -916,9 +897,9 @@ class CompleteWebsiteDownloader:
 
 if __name__ == "__main__":
     print("="*60)
-    print("🚀 NO-SPAM WEBSITE DOWNLOADER")
-    print("📥 Relaxed URL filtering with no duplicate checks")
-    print("🔍 Final discovery runs only once per site")
+    print("🚀 RELAXED WEBSITE DOWNLOADER - PERMISSIVE URL FILTERING")
+    print("📥 Downloads most URLs, only filters obvious junk")
+    print("🛡️ Better for sites like CSS Zen Garden")
     print("="*60)
     
     # Install required packages if not present
@@ -956,7 +937,7 @@ if __name__ == "__main__":
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded sites with no spam!")
+        print(f"\n🎉 Success! Downloaded sites with relaxed filtering!")
         print("💡 Now run the browser.py to view your downloaded sites!")
     else:
         print(f"\n❌ No sites downloaded")
