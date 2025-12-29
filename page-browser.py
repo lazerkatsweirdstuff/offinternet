@@ -1,1449 +1,704 @@
 import os
-import requests
 import zipfile
 import json
-from urllib.parse import urlparse, urljoin
-from bs4 import BeautifulSoup
-import time
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+import webbrowser
+from urllib.parse import urlparse, unquote, urljoin
+import base64
 import hashlib
 import re
-import base64
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-import sys
-from collections import deque
-import random
-from fake_useragent import UserAgent
-import gzip
-import brotli
-from PIL import Image
-import io
-import yt_dlp
+from bs4 import BeautifulSoup
 
-class YouTubeDownloader:
-    def __init__(self, output_dir=None, max_pages=10):
-        self.output_dir = output_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "youtube_videos")
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
+def get_script_directory():
+    """Get the directory where the script is located"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+class PageFileBrowser:
+    def __init__(self, pages_directory=None):
+        # Always look in script directory by default
+        script_dir = get_script_directory()
+        if pages_directory is None:
+            self.pages_directory = os.path.join(script_dir, "downloaded_sites")
+        else:
+            self.pages_directory = os.path.abspath(pages_directory)
+            
+        print(f"📁 Script location: {script_dir}")
+        print(f"📁 Browser looking for .page files in: {self.pages_directory}")
+        self.loaded_sites = {}
         
-        self.max_pages = max_pages
-        self.downloaded_videos = set()
-        self.suggested_queue = deque()
+        # Check if directory exists
+        if not os.path.exists(self.pages_directory):
+            print(f"❌ ERROR: Directory not found: {self.pages_directory}")
+            print("Please run the downloader first or specify the correct path.")
+            print(f"Expected to find: downloaded_sites folder in {script_dir}")
+            return
         
-        # SIMPLIFIED: Just download the best available format
-        self.ydl_opts = {
-            'format': 'best[ext=mp4]/best[height<=720]/best',  # Prefer MP4, then 720p or lower
-            'outtmpl': os.path.join(self.output_dir, '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'writeinfojson': True,
-            'writethumbnail': True,
-            'keepvideo': True,
-        }
-        
-        # Initialize session
-        self.session = requests.Session()
-        self.ua = UserAgent()
-        self.update_headers()
-    
-    def update_headers(self):
-        """Update session headers with random user agent"""
-        headers = {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        self.session.headers.update(headers)
-    
-    def get_suggested_videos(self, video_id, max_results=20):
-        """Get suggested videos from YouTube"""
-        suggested_videos = []
-        
+    def load_page_file(self, filepath):
+        """Load a .page file into memory"""
         try:
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            response = self.session.get(url, timeout=10)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
+            with zipfile.ZipFile(filepath, 'r') as zipf:
+                # Read metadata
+                metadata_str = zipf.read('metadata.json').decode('utf-8')
+                metadata = json.loads(metadata_str)
                 
-                for link in soup.find_all('a', href=True):
-                    href = link.get('href', '')
-                    if '/watch?v=' in href and 'list=' not in href:
-                        video_id_match = re.search(r'v=([a-zA-Z0-9_-]{11})', href)
-                        if video_id_match:
-                            suggested_id = video_id_match.group(1)
-                            if suggested_id != video_id and suggested_id not in self.downloaded_videos:
-                                video_title = link.get_text(strip=True) or f"Video {suggested_id}"
-                                suggested_videos.append({
-                                    'id': suggested_id,
-                                    'title': video_title[:100],
-                                    'url': f"https://www.youtube.com/watch?v={suggested_id}"
-                                })
-                                if len(suggested_videos) >= max_results:
-                                    break
-            
-            return suggested_videos[:max_results]
-            
-        except Exception as e:
-            print(f"   ⚠️ Error fetching suggested videos: {e}")
-            return []
-    
-    def download_video_simple(self, url, depth=0):
-        """Simplified video download without complex processing"""
-        if depth >= self.max_pages:
-            return None
-            
-        video_id = None
-        try:
-            # Extract video ID
-            if 'youtube.com/watch?v=' in url:
-                video_id = url.split('v=')[1].split('&')[0]
-            elif 'youtu.be/' in url:
-                video_id = url.split('youtu.be/')[1].split('?')[0]
-            
-            if not video_id or len(video_id) != 11:
-                print(f"❌ Invalid YouTube URL: {url}")
-                return None
-            
-            if video_id in self.downloaded_videos:
-                return None
-            
-            print(f"\n🎬 Downloading YouTube video ({depth+1}/{self.max_pages}):")
-            print(f"   🔗 URL: {url}")
-            print(f"   🆔 Video ID: {video_id}")
-            
-            # Get video info
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-                title = info.get('title', f'Video {video_id}')
-                channel = info.get('uploader', 'Unknown Channel')
-                duration = info.get('duration', 0)
+                # Read all pages
+                pages = {}
+                for file_info in zipf.filelist:
+                    if file_info.filename.startswith('pages/') and file_info.filename.endswith('.json'):
+                        page_data_str = zipf.read(file_info.filename).decode('utf-8')
+                        page_data = json.loads(page_data_str)
+                        pages[page_data['url']] = page_data
                 
-                print(f"   📹 Title: {title}")
-                print(f"   👤 Channel: {channel}")
-                print(f"   ⏱️ Duration: {duration}s")
-            
-            # Download with progress
-            def progress_hook(d):
-                if d['status'] == 'downloading':
-                    percent = d.get('_percent_str', '0%').strip()
-                    speed = d.get('_speed_str', 'N/A')
-                    print(f"   📥 Downloading: {percent} at {speed}", end='\r')
-                elif d['status'] == 'finished':
-                    print(f"   ✅ Download complete!                     ")
-            
-            download_opts = self.ydl_opts.copy()
-            download_opts['progress_hooks'] = [progress_hook]
-            
-            with yt_dlp.YoutubeDL(download_opts) as ydl:
-                ydl.download([url])
+                # Read assets
+                assets = {}
+                for file_info in zipf.filelist:
+                    if file_info.filename.startswith('assets/') and file_info.filename.endswith('.json'):
+                        asset_data_str = zipf.read(file_info.filename).decode('utf-8')
+                        asset_data = json.loads(asset_data_str)
+                        assets[asset_data['url']] = asset_data
                 
-                # Find downloaded file
-                video_file = None
-                info_file = os.path.join(self.output_dir, f"{video_id}.info.json")
-                thumb_file = None
-                
-                # Look for thumbnail
-                for ext in ['webp', 'jpg', 'png']:
-                    thumb_path = os.path.join(self.output_dir, f"{video_id}.{ext}")
-                    if os.path.exists(thumb_path):
-                        thumb_file = thumb_path
-                        break
-                
-                # Find video file
-                for file in os.listdir(self.output_dir):
-                    if file.startswith(video_id) and not file.endswith(('.json', '.jpg', '.png', '.webp')):
-                        video_file = os.path.join(self.output_dir, file)
-                        break
-                
-                if not video_file:
-                    print(f"   ❌ No video file found for {video_id}")
-                    return None
-                
-                # Get file info
-                file_size = os.path.getsize(video_file)
-                file_ext = os.path.splitext(video_file)[1].lower().lstrip('.')
-                
-                print(f"   💾 File: {os.path.basename(video_file)} ({file_size/1024/1024:.1f} MB)")
-                
-                # Mark as downloaded
-                self.downloaded_videos.add(video_id)
-                
-                # Get suggested videos
-                if depth < self.max_pages - 1:
-                    suggested_videos = self.get_suggested_videos(video_id, max_results=3)
-                    for suggested in suggested_videos:
-                        if suggested['id'] not in self.downloaded_videos:
-                            self.suggested_queue.append({
-                                'url': suggested['url'],
-                                'depth': depth + 1,
-                                'parent_id': video_id
-                            })
-                
-                return {
-                    'success': True,
-                    'video_id': video_id,
-                    'title': title,
-                    'channel': channel,
-                    'duration': duration,
-                    'video_file': video_file,
-                    'video_filename': os.path.basename(video_file),
-                    'file_size': file_size,
-                    'file_ext': file_ext,
-                    'original_url': url,
-                    'depth': depth,
-                    'info_file': info_file if os.path.exists(info_file) else None,
-                    'thumb_file': thumb_file
+                site_data = {
+                    'metadata': metadata,
+                    'pages': pages,
+                    'assets': assets
                 }
                 
+                domain = metadata['main_url']
+                self.loaded_sites[domain] = site_data
+                print(f"✅ Loaded site: {domain} with {len(pages)} pages and {len(assets)} assets")
+                return site_data
+                
         except Exception as e:
-            print(f"\n❌ YouTube download error: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Error loading {filepath}: {e}")
             return None
     
-    def create_embedded_page(self, video_data, page_number=1):
-        """Create HTML page with embedded video - using local file reference"""
-        video_id = video_data['video_id']
-        title = video_data['title']
-        channel = video_data['channel']
-        duration = video_data['duration']
-        video_filename = video_data['video_filename']
+    def load_all_page_files(self):
+        """Load all .page files from the directory"""
+        if not os.path.exists(self.pages_directory):
+            print(f"❌ Directory {self.pages_directory} does not exist")
+            return
         
-        # Format duration
-        if duration:
-            hours = duration // 3600
-            minutes = (duration % 3600) // 60
-            seconds = duration % 60
-            if hours > 0:
-                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
-            else:
-                duration_str = f"{minutes}:{seconds:02d}"
-        else:
-            duration_str = "0:00"
+        files = os.listdir(self.pages_directory)
+        page_files = [f for f in files if f.endswith('.page')]
         
-        # Format file size
-        file_size = video_data.get('file_size', 0)
-        if file_size > 1024*1024:
-            size_str = f"{file_size/1024/1024:.1f} MB"
-        elif file_size > 1024:
-            size_str = f"{file_size/1024:.1f} KB"
-        else:
-            size_str = f"{file_size} bytes"
+        print(f"📄 Found {len(page_files)} .page files:")
+        for filename in page_files:
+            filepath = os.path.join(self.pages_directory, filename)
+            print(f"  • Loading: {filename}")
+            self.load_page_file(filepath)
         
-        file_ext = video_data.get('file_ext', 'mp4').upper()
-        
-        # Use local file reference instead of base64
-        html_template = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title} - YouTube</title>
-    <style>
-        body {{
-            margin: 0;
-            padding: 20px;
-            background: #0f0f0f;
-            color: white;
-            font-family: Arial, sans-serif;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
-        .header {{
-            display: flex;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #333;
-        }}
-        .logo {{
-            color: red;
-            font-size: 24px;
-            font-weight: bold;
-            margin-right: 20px;
-        }}
-        .search {{
-            flex: 1;
-            padding: 8px 15px;
-            background: #121212;
-            border: 1px solid #303030;
-            border-radius: 20px;
-            color: white;
-        }}
-        .video-container {{
-            background: #000;
-            border-radius: 10px;
-            overflow: hidden;
-            margin-bottom: 20px;
-        }}
-        video {{
-            width: 100%;
-            max-height: 720px;
-        }}
-        .video-title {{
-            font-size: 20px;
-            font-weight: bold;
-            margin: 15px 0;
-        }}
-        .video-info {{
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 20px;
-            color: #aaa;
-            font-size: 14px;
-        }}
-        .actions {{
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-        }}
-        .btn {{
-            padding: 8px 15px;
-            background: #272727;
-            border: none;
-            border-radius: 20px;
-            color: white;
-            cursor: pointer;
-        }}
-        .subscribe {{
-            background: #cc0000;
-        }}
-        .download-info {{
-            background: #272727;
-            padding: 15px;
-            border-radius: 10px;
-            margin-top: 20px;
-            font-size: 12px;
-            color: #aaa;
-        }}
-        @media (max-width: 768px) {{
-            .video-info {{
-                flex-direction: column;
-                gap: 10px;
-            }}
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="logo">YouTube</div>
-            <input type="text" class="search" placeholder="Search" value="{title}">
-        </div>
-        
-        <div class="video-container">
-            <video controls autoplay>
-                <source src="video.mp4" type="video/mp4">
-                Your browser does not support HTML5 video.
-            </video>
-        </div>
-        
-        <div class="video-title">{title}</div>
-        
-        <div class="video-info">
-            <div>
-                <strong>{channel}</strong> • {duration_str} • {size_str}
-            </div>
-            <div>
-                Format: {file_ext} • Page: {page_number}/{self.max_pages}
-            </div>
-        </div>
-        
-        <div class="actions">
-            <button class="btn subscribe">SUBSCRIBE</button>
-            <button class="btn">LIKE</button>
-            <button class="btn">SHARE</button>
-            <button class="btn">SAVE</button>
-        </div>
-        
-        <div class="download-info">
-            <p>📥 Downloaded using YouTube Downloader • Video ID: {video_id}</p>
-            <p>🎬 Original URL: {video_data['original_url']}</p>
-            <p>⏰ Downloaded: {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
-        </div>
-    </div>
+        print(f"✅ Total sites loaded: {len(self.loaded_sites)}")
     
-    <script>
-        // Auto-play the video
-        document.addEventListener('DOMContentLoaded', function() {{
-            const video = document.querySelector('video');
-            video.play().catch(e => console.log('Auto-play prevented:', e));
-            
-            // Save playback position
-            video.addEventListener('timeupdate', function() {{
-                localStorage.setItem('yt_{video_id}_time', video.currentTime);
-            }});
-            
-            // Restore playback position
-            const savedTime = localStorage.getItem('yt_{video_id}_time');
-            if (savedTime) {{
-                video.currentTime = parseFloat(savedTime);
-            }}
-        }});
-    </script>
-</body>
-</html>'''
-        return html_template
-    
-    def save_as_page_file(self, video_data, page_number, total_pages):
-        """Save the YouTube video as a .page file - FIXED ENCODING"""
-        try:
-            # Create simple metadata
-            metadata = {
-                'video_id': video_data['video_id'],
-                'title': video_data['title'],
-                'channel': video_data['channel'],
-                'duration': video_data['duration'],
-                'original_url': video_data['original_url'],
-                'page_number': page_number,
-                'total_pages': total_pages,
-                'timestamp': time.time(),
-                'type': 'youtube_video',
-                'file_size': video_data.get('file_size', 0),
-                'file_format': video_data.get('file_ext', 'mp4'),
-            }
-            
-            # Create safe filename
-            safe_title = re.sub(r'[^\w\-_\. ]', '_', video_data['title'])[:50]
-            filename = f"youtube_{video_data['video_id']}_{page_number}_{safe_title}.page"
-            filepath = os.path.join(self.output_dir, filename)
-            
-            with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Save metadata with explicit UTF-8 encoding
-                metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
-                zipf.writestr('metadata.json', metadata_json.encode('utf-8'))
+    def find_page_by_url(self, url):
+        """Find a page across all loaded sites by URL"""
+        # Exact match
+        for site_data in self.loaded_sites.values():
+            if url in site_data['pages']:
+                return site_data['pages'][url]
+        
+        # Try without protocol
+        if url.startswith('http://'):
+            alt_url = url.replace('http://', 'https://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['pages']:
+                    return site_data['pages'][alt_url]
+        elif url.startswith('https://'):
+            alt_url = url.replace('https://', 'http://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['pages']:
+                    return site_data['pages'][alt_url]
+        
+        # Try to find by path or domain
+        for site_data in self.loaded_sites.values():
+            for page_url, page_data in site_data['pages'].items():
+                # Match by exact path
+                parsed_request = urlparse(url)
+                parsed_page = urlparse(page_url)
                 
-                # Save HTML with explicit UTF-8 encoding
-                html_content = self.create_embedded_page(video_data, page_number)
-                zipf.writestr('index.html', html_content.encode('utf-8'))
+                if parsed_request.path and parsed_request.path == parsed_page.path:
+                    return page_data
                 
-                # Save video file directly
-                video_file = video_data['video_file']
-                if os.path.exists(video_file):
-                    zipf.write(video_file, 'video.mp4')
-                
-                # Save video info if exists
-                info_file = video_data.get('info_file')
-                if info_file and os.path.exists(info_file):
-                    with open(info_file, 'r', encoding='utf-8') as f:
-                        video_info = json.load(f)
-                        video_info_json = json.dumps(video_info, indent=2, ensure_ascii=False)
-                        zipf.writestr('video_info.json', video_info_json.encode('utf-8'))
-                
-                # Save thumbnail if exists
-                thumb_file = video_data.get('thumb_file')
-                if thumb_file and os.path.exists(thumb_file):
-                    with open(thumb_file, 'rb') as f:
-                        thumb_data = f.read()
-                        zipf.writestr('thumbnail' + os.path.splitext(thumb_file)[1], thumb_data)
-            
-            print(f"💾 Saved: {filename}")
-            return filepath
-            
-        except Exception as e:
-            print(f"❌ Error saving .page file: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def download_youtube_with_suggestions(self, start_url):
-        """Main download method"""
-        print(f"\n{'='*60}")
-        print(f"🎬 YOUTUBE DOWNLOADER")
-        print(f"📊 Max videos: {self.max_pages}")
-        print(f"📁 Output: {self.output_dir}")
-        print("="*60)
-        
-        downloaded_files = []
-        
-        # Add starting URL
-        self.suggested_queue.append({
-            'url': start_url,
-            'depth': 0,
-            'parent_id': None
-        })
-        
-        current_page = 1
-        
-        while self.suggested_queue and current_page <= self.max_pages:
-            next_video = self.suggested_queue.popleft()
-            url = next_video['url']
-            
-            print(f"\n📄 Downloading video {current_page}/{self.max_pages}")
-            
-            # Download the video
-            video_data = self.download_video_simple(url, next_video['depth'])
-            
-            if video_data and video_data.get('success'):
-                # Save as .page file
-                page_file = self.save_as_page_file(video_data, current_page, self.max_pages)
-                if page_file:
-                    downloaded_files.append({
-                        'file': page_file,
-                        'title': video_data['title'],
-                        'video_id': video_data['video_id']
-                    })
-                
-                current_page += 1
-            else:
-                print(f"❌ Failed to download: {url}")
-            
-            # Small delay between downloads
-            if current_page <= self.max_pages:
-                time.sleep(1)
-        
-        # Summary
-        print(f"\n{'='*60}")
-        print(f"📊 DOWNLOAD SUMMARY")
-        print(f"📁 Downloaded {len(downloaded_files)} videos")
-        print(f"📂 Location: {self.output_dir}")
-        
-        for item in downloaded_files:
-            print(f"   • {item['title']}")
-        
-        print("="*60)
-        
-        return downloaded_files
-
-
-class CompleteWebsiteDownloader:
-    def __init__(self, output_dir=None, max_pages=10):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        if output_dir is None:
-            self.output_dir = os.path.join(script_dir, "downloaded_sites")
-        else:
-            self.output_dir = os.path.abspath(output_dir)
-            
-        print(f"📁 Save location: {self.output_dir}")
-        
-        self.max_pages = max_pages
-        
-        # Initialize YouTube downloader
-        youtube_output_dir = os.path.join(self.output_dir, "youtube_videos")
-        self.youtube_downloader = YouTubeDownloader(
-            output_dir=youtube_output_dir,
-            max_pages=self.max_pages
-        )
-        
-        # Initialize session with better headers
-        self.session = requests.Session()
-        self.ua = UserAgent()
-        self.update_session_headers()
-        
-        self.driver = None
-        self.visited_urls = set()
-        self.pages_to_crawl = deque()
-        self.failed_urls = set()
-        self.crawl_delay = random.uniform(1, 2)
-        self.max_retries = 3
-        
-        # Asset type priorities
-        self.critical_assets = ['.css', '.js']
-        self.important_assets = ['.png', '.jpg', '.jpeg', '.svg', '.ico', '.woff', '.woff2', '.ttf']
-        self.other_assets = ['.gif', '.webp', '.mp4', '.webm', '.json', '.xml']
-        
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-            print(f"✅ Created directory: {self.output_dir}")
-
-    def is_valid_url(self, url):
-        """RELAXED URL validation - only filter obvious junk"""
-        if not url or not isinstance(url, str):
-            return False
-            
-        # Skip obviously invalid URLs - MUCH MORE PERMISSIVE
-        obvious_junk_patterns = [
-            r'^[a-f0-9]{64}$',  # SHA256 hashes
-            r'^[a-f0-9]{40}$',  # SHA1 hashes  
-            r'^[a-zA-Z0-9+/]{40,}={0,2}$',  # Long base64 strings
-            r'^[\w\s-]+\s+[\w\s-]+$',  # Plain text with spaces (like "width=device-width")
-            r'^:[\w]+\(.*\)$',  # Rails-style routes like ":solution(.:format)"
-            r'^@\w+$',  # Twitter handles
-        ]
-        
-        for pattern in obvious_junk_patterns:
-            if re.match(pattern, url.strip()):
-                return False
-        
-        # Must have a valid scheme and netloc for HTTP URLs
-        try:
-            parsed = urlparse(url)
-            
-            # Skip data URLs and javascript
-            if parsed.scheme in ['data', 'javascript', 'mailto', 'tel']:
-                return False
-                
-            # For HTTP URLs, require netloc
-            if parsed.scheme in ['http', 'https']:
-                if not parsed.netloc:
-                    return False
-                    
-            return True
-            
-        except Exception:
-            return False
-
-    def is_likely_asset_url(self, url):
-        """Check if URL is likely a downloadable asset - MORE PERMISSIVE"""
-        # Always allow URLs with common file extensions
-        valid_extensions = self.critical_assets + self.important_assets + self.other_assets
-        
-        # Check file extensions
-        if any(url.lower().endswith(ext) for ext in valid_extensions):
-            return True
-            
-        # Check common asset patterns
-        asset_patterns = [
-            r'\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|ttf|webp)(\?.*)?$',
-            r'/static/',
-            r'/assets/',
-            r'/images/',
-            r'/fonts/',
-            r'/css/',
-            r'/js/',
-            r'\.min\.(js|css)',
-        ]
-        
-        # If it passes basic URL validation and looks like a resource, allow it
-        if any(re.search(pattern, url, re.IGNORECASE) for pattern in asset_patterns):
-            return True
-            
-        # For CSS Zen Garden specifically, be more permissive
-        if 'csszengarden.com' in url:
-            return True
-            
-        return False
-
-    def should_download_url(self, url):
-        """Main decision function for whether to download a URL"""
-        if not self.is_valid_url(url):
-            return False
-            
-        # Always download pages
-        if any(url.endswith(ext) for ext in ['', '.html', '.htm', '.php', '.aspx']):
-            return True
-            
-        # Download assets
-        if self.is_likely_asset_url(url):
-            return True
-            
-        # For URLs we're unsure about, check if they look like web resources
-        try:
-            parsed = urlparse(url)
-            if parsed.path and '.' in parsed.path:  # Has a file extension
-                return True
-            if parsed.query:  # Has query parameters (common in assets)
-                return True
-        except:
-            pass
-            
-        return False
-
-    def update_session_headers(self):
-        """Update session headers with random user agent"""
-        headers = {
-            'User-Agent': self.ua.random,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        self.session.headers.update(headers)
-
-    def setup_chrome_complete(self):
-        """Setup Chrome for complete asset capture"""
-        try:
-            chrome_options = Options()
-            chrome_options.add_argument("--incognito")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            chrome_options.add_argument(f"--user-agent={self.ua.random}")
-            
-            # Enable performance logging for network requests
-            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
-            
-            print("🔄 Starting Chrome for complete asset capture...")
-            self.driver = webdriver.Chrome(options=chrome_options)
-            
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            self.driver.implicitly_wait(15)
-            print("✅ Chrome started successfully")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Failed to start Chrome: {e}")
-            return False
-
-    def manual_cloudflare_solve(self, url):
-        """Manual Cloudflare solving"""
-        print("🚨 CLOUDFLARE SOLVER")
-        print("="*50)
-        
-        if not self.setup_chrome_complete():
-            return False
-            
-        try:
-            print(f"🌐 Opening: {url}")
-            self.driver.get(url)
-            
-            print("\n" + "="*50)
-            print("💡 CHROME IS OPEN!")
-            print("Please:")
-            print("1. Solve any security challenges")
-            print("2. Wait for the page to fully load (CSS, images, everything)")
-            print("3. Scroll down to trigger lazy loading")
-            print("4. Return here and press Enter")
-            print("="*50)
-            
-            input("⏳ Press Enter when the page is COMPLETELY loaded...")
-            
-            current_url = self.driver.current_url
-            print(f"🔗 Current URL: {current_url}")
-            print(f"📄 Page title: {self.driver.title}")
-            
-            # Scroll to trigger lazy loading
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            self.driver.execute_script("window.scrollTo(0, 0);")
-            
-            # Capture ALL cookies
-            cookies = self.driver.get_cookies()
-            for cookie in cookies:
-                self.session.cookies.set(cookie['name'], cookie['value'])
-            
-            print(f"✅ Captured {len(cookies)} cookies")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error during manual solve: {e}")
-            return False
-
-    def extract_all_links_complete(self, html, base_url):
-        """Extract ALL links for comprehensive crawling"""
-        soup = BeautifulSoup(html, 'html.parser')
-        links = set()
-        base_domain = urlparse(base_url).netloc
-        
-        # Get all anchor tags
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
-                full_url = urljoin(base_url, href)
-                clean_url = self.clean_url(full_url)
-                
-                if self.is_valid_internal_url(clean_url, base_domain) and self.should_download_url(clean_url):
-                    links.add(clean_url)
-        
-        return links
-
-    def is_valid_internal_url(self, url, base_domain):
-        """Check if URL is valid and internal"""
-        if not url.startswith(('http://', 'https://')):
-            return False
-            
-        if base_domain not in url:
-            return False
-            
-        return True
-
-    def clean_url(self, url):
-        """Clean URL but keep important parameters"""
-        try:
-            parsed = urlparse(url)
-            # Remove fragment only, keep query parameters
-            cleaned = parsed._replace(fragment='')
-            return cleaned.geturl()
-        except Exception:
-            return url
-
-    def download_with_retry_complete(self, url, retry_count=0, method='get', data=None):
-        """Enhanced download with complete retry logic"""
-        if not self.should_download_url(url):
-            print(f"    🚫 Skipping URL (filtered): {url}")
-            return None
-            
-        if retry_count >= self.max_retries:
-            self.failed_urls.add(url)
-            return None
-        
-        try:
-            time.sleep(random.uniform(0.5, 1.5))
-            
-            if random.random() < 0.3:
-                self.update_session_headers()
-            
-            if method == 'post' and data:
-                response = self.session.post(url, data=data, timeout=20, allow_redirects=True)
-            else:
-                response = self.session.get(url, timeout=20, allow_redirects=True)
-            
-            if response.status_code == 200:
-                return response
-            elif response.status_code == 403:
-                print(f"    🚫 403 Forbidden: {url}")
-                return self.try_alternative_download(url, retry_count)
-            elif response.status_code == 429:
-                wait_time = 15 + (retry_count * 10)
-                print(f"    🐢 429 Rate Limited - waiting {wait_time}s: {url}")
-                time.sleep(wait_time)
-                return self.download_with_retry_complete(url, retry_count + 1)
-            elif response.status_code in [404, 410]:
-                print(f"    ❌ {response.status_code} Not Found: {url}")
-                return None
-            else:
-                print(f"    ⚠️ HTTP {response.status_code} for {url}")
-                time.sleep(5)
-                return self.download_with_retry_complete(url, retry_count + 1)
-                
-        except Exception as e:
-            print(f"    ❌ Error: {e}")
-            time.sleep(3)
-            return self.download_with_retry_complete(url, retry_count + 1)
-
-    def try_alternative_download(self, url, retry_count):
-        """Try alternative download methods"""
-        print(f"    🔄 Trying alternative download for: {url}")
-        
-        # Method 1: Try with Selenium if available
-        if self.driver:
-            try:
-                js_fetch = f"""
-                fetch('{url}').then(r => r.text()).then(t => window.fetchedContent = t);
-                """
-                self.driver.execute_script(js_fetch)
-                time.sleep(2)
-                content = self.driver.execute_script("return window.fetchedContent || ''")
-                if content:
-                    class MockResponse:
-                        def __init__(self, content):
-                            self.content = content.encode('utf-8')
-                            self.text = content
-                            self.status_code = 200
-                            self.headers = {'content-type': 'text/html'}
-                    return MockResponse(content)
-            except:
-                pass
-        
-        return self.download_with_retry_complete(url, retry_count + 1)
-
-    def crawl_website_complete(self, start_url, downloaded_content):
-        """Complete website crawling with enhanced asset capture"""
-        print("🕷️ Starting COMPREHENSIVE website crawl...")
-        
-        self.pages_to_crawl.append(start_url)
-        self.visited_urls.add(start_url)
-        
-        crawled_pages = 0
-        consecutive_failures = 0
-        
-        while self.pages_to_crawl and crawled_pages < self.max_pages:
-            if consecutive_failures >= 3:
-                print("    🚨 Too many failures, trying recovery...")
-                if not self.recover_from_failures():
-                    break
-                consecutive_failures = 0
-                
-            current_url = self.pages_to_crawl.popleft()
-            
-            print(f"📄 [{crawled_pages+1}/{self.max_pages}] {self.get_url_display_name(current_url)}")
-            
-            # Download the page with multiple approaches
-            page_data = self.download_page_enhanced(current_url)
-            if page_data:
-                downloaded_content['pages'][current_url] = page_data
-                crawled_pages += 1
-                consecutive_failures = 0
-                
-                # Extract links for further crawling
-                new_links = self.extract_all_links_complete(page_data['content'], current_url)
-                for link in new_links:
-                    if link not in self.visited_urls and link not in self.failed_urls:
-                        self.visited_urls.add(link)
-                        self.pages_to_crawl.append(link)
-                        print(f"      🔗 Found new page: {self.get_url_display_name(link)}")
-                
-                # Download ALL assets including CSS from this page
-                self.download_all_assets_enhanced(page_data['content'], current_url, downloaded_content)
-                
-                time.sleep(random.uniform(1, 2))
-            else:
-                consecutive_failures += 1
-                print(f"    ❌ Failed (#{consecutive_failures})")
-        
-        print(f"✅ Crawl complete: {crawled_pages} pages")
-        
-        # Final asset discovery pass
-        self.final_asset_discovery(downloaded_content)
-
-    def get_url_display_name(self, url):
-        """Get a clean display name for URL"""
-        parsed = urlparse(url)
-        path = parsed.path
-        if not path or path == '/':
-            return f"{parsed.netloc}/"
-        return os.path.basename(path) or path[:80]
-
-    def recover_from_failures(self):
-        """Attempt to recover from consecutive failures"""
-        print("    🔄 Attempting recovery...")
-        time.sleep(5)
-        self.update_session_headers()
-        return True
-
-    def download_page_enhanced(self, url):
-        """Enhanced page download with multiple fallbacks"""
-        # Try direct download first
-        response = self.download_with_retry_complete(url)
-        if response and response.status_code == 200:
-            return {
-                'url': response.url,
-                'content': response.text,
-                'content_type': response.headers.get('content-type', 'text/html'),
-                'status_code': 200,
-                'downloaded_with': 'session'
-            }
-        
-        # Try Selenium as fallback
-        if self.driver:
-            try:
-                print(f"    🔄 Falling back to Selenium for: {url}")
-                self.driver.get(url)
-                time.sleep(3)
-                return {
-                    'url': url,
-                    'content': self.driver.page_source,
-                    'content_type': 'text/html',
-                    'status_code': 200,
-                    'downloaded_with': 'selenium'
-                }
-            except Exception as e:
-                print(f"    ❌ Selenium fallback failed: {e}")
+                # Match domain and similar path
+                if (parsed_request.netloc == parsed_page.netloc and 
+                    parsed_request.path in parsed_page.path):
+                    return page_data
         
         return None
 
-    def download_asset_complete(self, url):
-        """Enhanced asset download with better URL validation"""
-        # Skip URLs that shouldn't be downloaded
-        if not self.should_download_url(url):
-            print(f"      🚫 Skipping filtered URL: {url}")
-            return None
-            
+    def find_asset_by_url(self, url):
+        """Find an asset across all loaded sites by URL"""
+        # Exact match
+        for site_data in self.loaded_sites.values():
+            if url in site_data['assets']:
+                return site_data['assets'][url]
+        
+        # Try without protocol
+        if url.startswith('http://'):
+            alt_url = url.replace('http://', 'https://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['assets']:
+                    return site_data['assets'][alt_url]
+        elif url.startswith('https://'):
+            alt_url = url.replace('https://', 'http://', 1)
+            for site_data in self.loaded_sites.values():
+                if alt_url in site_data['assets']:
+                    return site_data['assets'][alt_url]
+        
+        # Try by filename
+        requested_filename = os.path.basename(urlparse(url).path)
+        if requested_filename:
+            for site_data in self.loaded_sites.values():
+                for asset_url, asset_data in site_data['assets'].items():
+                    asset_filename = os.path.basename(urlparse(asset_url).path)
+                    if asset_filename == requested_filename:
+                        return asset_data
+        
+        return None
+
+class PageFileRequestHandler(SimpleHTTPRequestHandler):
+    page_browser = None
+    
+    def do_GET(self):
+        """Handle GET requests"""
         try:
-            if any(url.endswith(ext) for ext in self.critical_assets):
-                # Critical assets - be more persistent
-                response = self.download_with_retry_complete(url)
-            else:
-                response = self.session.get(url, timeout=15, stream=True)
-                
-            if response and response.status_code == 200:
-                return self.process_asset_response(response, url)
-            else:
-                return None
-                
-        except Exception as e:
-            print(f"      ❌ Error downloading asset {url}: {e}")
-            return None
-
-    def process_asset_response(self, response, url):
-        """Process asset response with enhanced content handling"""
-        content_type = response.headers.get('content-type', '').lower()
-        content_encoding = response.headers.get('content-encoding', '').lower()
-        
-        # Handle content encoding
-        content = response.content
-        if content_encoding == 'gzip':
-            try:
-                content = gzip.decompress(content)
-            except:
-                pass
-        elif content_encoding == 'br':
-            try:
-                content = brotli.decompress(content)
-            except:
-                pass
-        
-        # Skip very large files (>10MB)
-        if len(content) > 10 * 1024 * 1024:
-            print(f"      ⚠️ Skipping large file: {len(content)//1024}KB - {url}")
-            return None
-        
-        # Determine encoding and processing
-        is_binary = any(ct in content_type for ct in ['image', 'font', 'binary', 'octet-stream']) or url.endswith(('.css', '.js'))
-        
-        if is_binary:
-            encoded = base64.b64encode(content).decode('utf-8')
-            encoding = 'base64'
+            # Parse the requested path
+            path = unquote(self.path)
             
-            # Additional processing for images
-            if 'image' in content_type:
-                try:
-                    img = Image.open(io.BytesIO(content))
-                    asset_info = {
-                        'format': img.format,
-                        'size': img.size,
-                        'mode': img.mode
-                    }
-                except:
-                    asset_info = {}
-            else:
-                asset_info = {}
-                
-            return {
-                'url': url,
-                'content': encoded,
-                'content_type': content_type,
-                'encoding': encoding,
-                'size': len(encoded),
-                'filename': os.path.basename(urlparse(url).path) or 'resource',
-                'asset_info': asset_info,
-                'is_critical': url.endswith(tuple(self.critical_assets))
-            }
-        else:
-            # Text content
-            try:
-                encoded = content.decode('utf-8')
-                encoding = 'text'
-            except UnicodeDecodeError:
-                try:
-                    encoded = content.decode('latin-1')
-                    encoding = 'text'
-                except:
-                    encoded = base64.b64encode(content).decode('utf-8')
-                    encoding = 'base64'
+            # Remove query parameters
+            if '?' in path:
+                path = path.split('?')[0]
             
-            return {
-                'url': url,
-                'content': encoded,
-                'content_type': content_type,
-                'encoding': encoding,
-                'size': len(encoded),
-                'filename': os.path.basename(urlparse(url).path) or 'resource',
-                'is_critical': url.endswith(tuple(self.critical_assets))
-            }
-
-    def extract_assets_from_html(self, html, base_url):
-        """Extract ALL possible assets from HTML - MORE PERMISSIVE"""
-        soup = BeautifulSoup(html, 'html.parser')
-        assets = set()
-        
-        # Standard tags
-        tags_attrs = [
-            ('link', 'href'),
-            ('script', 'src'),
-            ('img', 'src'),
-            ('source', 'src'),
-            ('source', 'srcset'),
-            ('video', 'poster'),
-            ('audio', 'src'),
-            ('iframe', 'src'),
-            ('embed', 'src'),
-            ('object', 'data'),
-            ('meta', 'content'),
-        ]
-        
-        for tag, attr in tags_attrs:
-            for element in soup.find_all(tag, **{attr: True}):
-                attr_value = element.get(attr)
-                if attr_value:
-                    # Handle srcset (multiple images)
-                    if attr == 'srcset':
-                        for src_entry in attr_value.split(','):
-                            src_url = src_entry.strip().split(' ')[0]
-                            if src_url:
-                                full_url = urljoin(base_url, src_url)
-                                if self.should_download_url(full_url):
-                                    assets.add(full_url)
-                    else:
-                        full_url = urljoin(base_url, attr_value)
-                        if self.should_download_url(full_url):
-                            assets.add(full_url)
-        
-        # Extract from inline styles and JavaScript
-        for style in soup.find_all('style'):
-            if style.string:
-                assets.update(self.extract_urls_from_css(style.string, base_url))
-        
-        for script in soup.find_all('script'):
-            if script.string:
-                assets.update(self.extract_urls_from_js(script.string, base_url))
-        
-        # Extract from tag attributes that might contain URLs
-        for tag in soup.find_all(True):
-            for attr in ['style', 'data-src', 'data-background', 'data-url']:
-                if tag.get(attr):
-                    urls = re.findall(r'url\([\'"]?([^)"\']+)[\'"]?\)', tag.get(attr))
-                    for url in urls:
-                        full_url = urljoin(base_url, url)
-                        if self.should_download_url(full_url):
-                            assets.add(full_url)
-        
-        return assets
-
-    def extract_urls_from_css(self, css_text, base_url):
-        """Extract URLs from CSS text - MORE PERMISSIVE"""
-        urls = set()
-        
-        patterns = [
-            r'url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'@import\s+[\'"]([^\'"]+)[\'"]',
-            r'src:\s*url\([\'"]?([^)"\']+)[\'"]?\)',
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, css_text, re.IGNORECASE)
-            for match in matches:
-                url = match.strip()
-                if url and not url.startswith(('data:', 'blob:')):
-                    full_url = urljoin(base_url, url)
-                    if self.should_download_url(full_url):
-                        urls.add(full_url)
-        
-        return urls
-
-    def extract_urls_from_js(self, js_text, base_url):
-        """Extract URLs from JavaScript text - MORE PERMISSIVE"""
-        urls = set()
-        
-        patterns = [
-            r'[\'\"](https?://[^\'\"]+)[\'\"]',
-            r'[\'\"](/[^\'\"]+)[\'\"]',
-            r'url\([\'"]?([^)"\']+)[\'"]?\)',
-            r'=\s*[\'\"]([^\'\"]+\.(css|js|png|jpg|jpeg|svg|ico))[\'\"]',
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, js_text)
-            for match in matches:
-                url = match[0] if isinstance(match, tuple) else match
-                if url and not url.startswith(('data:', 'blob:', 'javascript:')):
-                    full_url = urljoin(base_url, url)
-                    if self.should_download_url(full_url):
-                        urls.add(full_url)
-        
-        return urls
-
-    def download_all_assets_enhanced(self, html, base_url, downloaded_content):
-        """Enhanced asset download with prioritization"""
-        assets = self.extract_assets_from_html(html, base_url)
-        
-        # Also get assets from Selenium if available
-        if self.driver and base_url == self.driver.current_url:
-            selenium_assets = self.get_selenium_network_requests()
-            assets.update(selenium_assets)
-        
-        print(f"    📦 Found {len(assets)} potential assets")
-        
-        if not assets:
-            print("    ℹ️ No assets found to download")
-            return
+            print(f"🔍 Requested path: {path}")
             
-        # Download all assets that pass our filters
-        successful = 0
-        total_assets = len(assets)
-        
-        for j, asset_url in enumerate(assets):
-            if asset_url in downloaded_content['assets'] or asset_url in self.failed_urls:
-                continue
-            
-            filename = os.path.basename(urlparse(asset_url).path) or asset_url[:60]
-            print(f"      📁 [{successful+1}/{total_assets}] {filename}")
-            
-            asset_data = self.download_asset_complete(asset_url)
-            if asset_data:
-                downloaded_content['assets'][asset_url] = asset_data
-                successful += 1
-                
-                # Process CSS files for nested assets
-                if asset_url.endswith('.css'):
-                    self.download_css_assets(asset_data, asset_url, downloaded_content)
-            else:
-                print(f"      ❌ Failed: {filename}")
-                self.failed_urls.add(asset_url)
-            
-            time.sleep(0.1)
-        
-        print(f"    ✅ Downloaded: {successful}/{total_assets} assets")
-
-    def get_selenium_network_requests(self):
-        """Get all network requests from Selenium performance logs"""
-        assets = set()
-        try:
-            logs = self.driver.get_log('performance')
-            for log in logs:
-                try:
-                    message = json.loads(log['message'])
-                    message_type = message.get('message', {}).get('method', '')
-                    
-                    if message_type == 'Network.responseReceived':
-                        response = message['message']['params']['response']
-                        url = response.get('url', '')
-                        if url and self.should_download_url(url):
-                            assets.add(url)
-                except:
-                    continue
-        except Exception as e:
-            print(f"      ⚠️ Selenium network log error: {e}")
-        
-        return assets
-
-    def download_css_assets(self, css_asset, css_url, downloaded_content):
-        """Download assets referenced in CSS files"""
-        try:
-            css_content = css_asset['content']
-            
-            # Decode if base64 encoded
-            if css_asset['encoding'] == 'base64':
-                css_content = base64.b64decode(css_content)
-                
-                # Try multiple decoding methods
-                css_text = None
-                decoding_methods = [
-                    ('utf-8', 'UTF-8'),
-                    ('latin-1', 'Latin-1'),
-                    ('cp1252', 'Windows-1252'),
-                ]
-                
-                for encoding, name in decoding_methods:
-                    try:
-                        css_text = css_content.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-            else:
-                css_text = css_content
-            
-            if not css_text:
+            # Handle root - show index of loaded sites
+            if path == '/' or path == '/index.html':
+                self.serve_index()
                 return
             
-            # Extract and download referenced assets
-            css_assets = self.extract_urls_from_css(css_text, css_url)
+            # Handle asset requests
+            if path.startswith('/asset/'):
+                self.serve_asset(path)
+                return
             
-            for asset_url in css_assets:
-                if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls:
-                    print(f"      📥 CSS asset: {os.path.basename(asset_url) or asset_url[:50]}")
-                    asset_data = self.download_asset_complete(asset_url)
-                    if asset_data:
-                        downloaded_content['assets'][asset_url] = asset_data
+            # Handle requests for specific pages
+            if path.startswith('/page/'):
+                self.serve_saved_page(path)
+                return
+            
+            # Default to trying to find a matching page
+            self.serve_saved_page(f'/page{path}')
             
         except Exception as e:
-            print(f"      ⚠️ CSS asset download error: {e}")
-
-    def final_asset_discovery(self, downloaded_content):
-        """Final pass to discover missing assets"""
-        print("🔍 Performing final asset discovery...")
+            self.send_error(500, f"Server error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    def serve_index(self):
+        """Serve an index page listing all loaded sites"""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
         
-        # Check for common missing assets
-        common_assets = [
-            '/favicon.ico',
-            '/apple-touch-icon.png',
-            '/robots.txt',
-            '/sitemap.xml',
-            '/manifest.json'
-        ]
-        
-        for page_url in downloaded_content['pages']:
-            base_domain = urlparse(page_url).netloc
-            for asset_path in common_assets:
-                asset_url = f"https://{base_domain}{asset_path}"
-                if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls:
-                    print(f"    🔎 Checking for common asset: {asset_path}")
-                    asset_data = self.download_asset_complete(asset_url)
-                    if asset_data:
-                        downloaded_content['assets'][asset_url] = asset_data
-
-    def download_website(self, url):
-        """Main download method - now handles YouTube specially"""
-        # Check if URL is YouTube
-        if 'youtube.com' in url or 'youtu.be' in url:
-            print("🎬 YouTube URL detected - using YouTube downloader")
-            return self.youtube_downloader.download_youtube_with_suggestions(url)
-        else:
-            # Use existing website downloader for other sites
-            print(f"⬇️ Target: {url}")
-            
-            # Manual Cloudflare solve
-            if not self.manual_cloudflare_solve(url):
-                print("❌ Failed to setup Chrome session")
-                return None
-            
-            # Download with complete approach
-            result = self.download_with_session_complete(url)
-            
-            # Cleanup
-            if self.driver:
-                self.driver.quit()
-                self.driver = None
-            
-            return result
-
-    def download_with_session_complete(self, url):
-        """Download using complete approach"""
-        print("⬇️ Downloading with RELAXED URL FILTERING...")
-        
-        downloaded_content = {
-            'main_url': url,
-            'pages': {},
-            'assets': {},
-            'timestamp': time.time(),
-            'version': '2.2_relaxed_filters'
-        }
-        
-        # Reset state
-        self.visited_urls.clear()
-        self.pages_to_crawl.clear()
-        self.failed_urls.clear()
-        
-        # Start enhanced crawling
-        self.crawl_website_complete(url, downloaded_content)
-        
-        # Statistics
-        total_pages = len(downloaded_content['pages'])
-        total_assets = len(downloaded_content['assets'])
-        failed_count = len(self.failed_urls)
-        
-        print(f"    📊 Final Statistics:")
-        print(f"    📄 Total pages: {total_pages}")
-        print(f"    📦 Total assets: {total_assets}")
-        print(f"    ❌ Failed URLs: {failed_count}")
-        
-        # Save file
-        domain = urlparse(url).netloc.replace(':', '_')
-        filename = f"{domain}_RELAXED_{int(time.time())}.page"
-        filepath = os.path.join(self.output_dir, filename)
-        
-        if self.save_page_file(filepath, downloaded_content):
-            print(f"💾 Saved: {filename}")
-            return filepath
-        else:
-            print(f"❌ Failed to save: {filename}")
-            return None
-
-    def save_page_file(self, filepath, content):
-        """Save as .page file"""
-        try:
-            with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Enhanced metadata
-                metadata = {
-                    'main_url': content['main_url'],
-                    'timestamp': content['timestamp'],
-                    'version': content['version'],
-                    'pages': len(content['pages']),
-                    'assets': len(content['assets']),
-                    'failed_urls': list(self.failed_urls)
+        html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>🌐 Offline Website Browser</title>
+            <style>
+                * {
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
                 }
-                metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
-                zipf.writestr('metadata.json', metadata_json.encode('utf-8'))
                 
-                # Pages
-                for url, data in content['pages'].items():
-                    hash_val = hashlib.md5(url.encode()).hexdigest()[:12]
-                    page_json = json.dumps(data, indent=2, ensure_ascii=False)
-                    zipf.writestr(f"pages/{hash_val}.json", page_json.encode('utf-8'))
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                }
                 
-                # Assets
-                for url, data in content['assets'].items():
-                    hash_val = hashlib.md5(url.encode()).hexdigest()[:12]
-                    asset_json = json.dumps(data, indent=2, ensure_ascii=False)
-                    zipf.writestr(f"assets/{hash_val}.json", asset_json.encode('utf-8'))
-            
-            file_size = os.path.getsize(filepath) / (1024 * 1024)
-            print(f"    💾 File size: {file_size:.2f} MB")
-            return os.path.exists(filepath)
-        except Exception as e:
-            print(f"    ❌ Save error: {e}")
-            return False
-
-    def download_from_list(self, url_list):
-        """Download multiple sites"""
-        downloaded_files = []
-        
-        print(f"🎯 Downloading {len(url_list)} sites with RELAXED FILTERS...")
-        print(f"📁 Output: {self.output_dir}")
-        
-        for i, url in enumerate(url_list, 1):
-            url = url.strip()
-            if not url:
-                continue
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                }
                 
-            print(f"\n{'='*60}")
-            print(f"#{i}: {url}")
-            print("="*60)
-            
-            try:
-                start_time = time.time()
-                result = self.download_website(url)
-                end_time = time.time()
+                .header {
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(10px);
+                    padding: 40px;
+                    border-radius: 20px;
+                    margin-bottom: 30px;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                    text-align: center;
+                }
                 
-                if result:
-                    if isinstance(result, list):  # YouTube returns list of files
-                        downloaded_files.extend(result)
-                        print(f"✅ YouTube: Downloaded {len(result)} videos ({end_time - start_time:.1f}s)")
-                    else:  # Regular website returns single file path
-                        downloaded_files.append(result)
-                        print(f"✅ Success! ({end_time - start_time:.1f}s)")
-                else:
-                    print(f"❌ Failed after {end_time - start_time:.1f}s")
+                .header h1 {
+                    font-size: 3em;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    margin-bottom: 10px;
+                }
+                
+                .header p {
+                    color: #666;
+                    font-size: 1.2em;
+                }
+                
+                .sites-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+                    gap: 25px;
+                }
+                
+                .site-card {
+                    background: rgba(255, 255, 255, 0.95);
+                    backdrop-filter: blur(10px);
+                    padding: 30px;
+                    border-radius: 15px;
+                    box-shadow: 0 15px 35px rgba(0,0,0,0.1);
+                    transition: transform 0.3s ease, box-shadow 0.3s ease;
+                }
+                
+                .site-card:hover {
+                    transform: translateY(-5px);
+                    box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+                }
+                
+                .site-card h2 {
+                    margin-bottom: 15px;
+                }
+                
+                .site-card h2 a {
+                    color: #333;
+                    text-decoration: none;
+                    font-size: 1.4em;
+                    transition: color 0.3s ease;
+                }
+                
+                .site-card h2 a:hover {
+                    color: #667eea;
+                }
+                
+                .stats {
+                    display: flex;
+                    gap: 15px;
+                    margin-bottom: 20px;
+                    flex-wrap: wrap;
+                }
+                
+                .stat {
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    color: white;
+                    padding: 8px 15px;
+                    border-radius: 20px;
+                    font-size: 0.9em;
+                    font-weight: 500;
+                }
+                
+                .pages-list {
+                    max-height: 200px;
+                    overflow-y: auto;
+                    margin-top: 15px;
+                }
+                
+                .pages-list ul {
+                    list-style: none;
+                }
+                
+                .pages-list li {
+                    margin-bottom: 8px;
+                    padding: 8px 12px;
+                    background: #f8f9fa;
+                    border-radius: 8px;
+                    transition: background 0.3s ease;
+                }
+                
+                .pages-list li:hover {
+                    background: #e9ecef;
+                }
+                
+                .pages-list a {
+                    color: #495057;
+                    text-decoration: none;
+                    display: block;
+                }
+                
+                .pages-list a:hover {
+                    color: #667eea;
+                }
+                
+                .empty-state {
+                    text-align: center;
+                    padding: 60px 20px;
+                    color: #666;
+                }
+                
+                .empty-state h2 {
+                    margin-bottom: 15px;
+                    color: #333;
+                }
+                
+                /* Custom scrollbar */
+                .pages-list::-webkit-scrollbar {
+                    width: 6px;
+                }
+                
+                .pages-list::-webkit-scrollbar-track {
+                    background: #f1f1f1;
+                    border-radius: 3px;
+                }
+                
+                .pages-list::-webkit-scrollbar-thumb {
+                    background: #667eea;
+                    border-radius: 3px;
+                }
+                
+                .pages-list::-webkit-scrollbar-thumb:hover {
+                    background: #764ba2;
+                }
+                
+                @media (max-width: 768px) {
+                    .sites-grid {
+                        grid-template-columns: 1fr;
+                    }
                     
-            except Exception as e:
-                print(f"❌ Error: {e}")
-                import traceback
-                traceback.print_exc()
+                    .header {
+                        padding: 30px 20px;
+                    }
+                    
+                    .header h1 {
+                        font-size: 2.2em;
+                    }
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🌐 Offline Website Browser</h1>
+                    <p>Browse your downloaded websites offline</p>
+                </div>
+        """
         
-        print(f"\n{'='*60}")
-        print(f"📊 Complete: {len(downloaded_files)} items downloaded")
-        print(f"💾 Location: {self.output_dir}")
+        if not self.page_browser.loaded_sites:
+            html += """
+                <div class="empty-state">
+                    <h2>No websites loaded</h2>
+                    <p>No .page files found in the downloaded_sites directory.</p>
+                    <p>Run the downloader first to download some websites!</p>
+                </div>
+            """
+        else:
+            html += '<div class="sites-grid">'
+            
+            for domain, site_data in self.page_browser.loaded_sites.items():
+                metadata = site_data['metadata']
+                pages = list(site_data['pages'].keys())
+                
+                html += f"""
+                <div class="site-card">
+                    <h2><a href="/page/{domain}">{domain}</a></h2>
+                    <div class="stats">
+                        <span class="stat">📄 {len(site_data['pages'])} pages</span>
+                        <span class="stat">🎨 {len(site_data['assets'])} assets</span>
+                        <span class="stat">💾 {metadata.get('total_size', 0) // 1024} KB</span>
+                    </div>
+                    <div class="pages-list">
+                        <strong>Available Pages:</strong>
+                        <ul>
+                """
+                
+                # Show main pages
+                for page_url in pages[:8]:  # Show first 8 pages
+                    page_name = urlparse(page_url).path or '/'
+                    if len(page_name) > 40:
+                        page_name = page_name[:37] + '...'
+                    html += f'<li><a href="/page/{page_url}">{page_name}</a></li>'
+                
+                if len(pages) > 8:
+                    html += f'<li>... and {len(pages) - 8} more pages</li>'
+                
+                html += """
+                        </ul>
+                    </div>
+                </div>
+                """
+            
+            html += '</div>'
         
-        return downloaded_files
+        html += """
+            </div>
+        </body>
+        </html>
+        """
+        
+        self.wfile.write(html.encode('utf-8'))
+    
+    def serve_saved_page(self, path):
+        """Serve a page from the loaded .page files"""
+        # Extract the requested URL from the path
+        requested_url = path[6:]  # Remove '/page/' prefix
+        
+        if not requested_url:
+            self.send_error(404, "Page not found")
+            return
+        
+        print(f"🔍 Looking for page: {requested_url}")
+        
+        # Find the page in loaded sites
+        page_data = self.page_browser.find_page_by_url(requested_url)
+        
+        if page_data:
+            content = page_data['content']
+            
+            # Fix links in the content to work with our offline browser
+            content = self.rewrite_links(content, page_data['url'])
+            
+            self.send_response(200)
+            self.send_header('Content-type', page_data.get('content_type', 'text/html'))
+            self.end_headers()
+            self.wfile.write(content.encode('utf-8'))
+            print(f"✅ Served page: {requested_url}")
+        else:
+            print(f"❌ Page not found: {requested_url}")
+            # Try to serve a nice 404 page
+            self.serve_404(requested_url)
+    
+    def serve_404(self, requested_url):
+        """Serve a nice 404 page"""
+        self.send_response(404)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Page Not Found</title>
+            <style>
+                body {{ 
+                    font-family: Arial, sans-serif; 
+                    margin: 40px; 
+                    background: #f5f5f5;
+                    text-align: center;
+                }}
+                .error-container {{
+                    background: white;
+                    padding: 40px;
+                    border-radius: 10px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }}
+                h1 {{ color: #e74c3c; }}
+                a {{ color: #3498db; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <div class="error-container">
+                <h1>❌ Page Not Found</h1>
+                <p>The page <strong>{requested_url}</strong> was not found in your downloaded sites.</p>
+                <p><a href="/">← Back to Home</a></p>
+            </div>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode('utf-8'))
+    
+    def serve_asset(self, path):
+        """Serve asset files (CSS, JS, images, etc.)"""
+        try:
+            # Extract asset URL from path: /asset/ENCODED_URL
+            encoded_url = path[7:]  # Remove '/asset/' prefix
+            
+            if not encoded_url:
+                self.send_error(404, "Asset URL not specified")
+                return
+            
+            # URL decode the asset URL
+            asset_url = unquote(encoded_url)
+            
+            print(f"🔍 Looking for asset: {asset_url}")
+            
+            # Find asset in loaded sites
+            asset_data = self.page_browser.find_asset_by_url(asset_url)
+            
+            if not asset_data:
+                print(f"❌ Asset not found: {asset_url}")
+                self.send_error(404, f"Asset not found: {asset_url}")
+                return
+            
+            # Determine content type
+            content_type = asset_data.get('content_type', 'application/octet-stream')
+            encoding = asset_data.get('encoding', 'text')
+            content = asset_data['content']
+            
+            self.send_response(200)
+            self.send_header('Content-type', content_type)
+            self.send_header('Cache-Control', 'public, max-age=3600')  # Cache for 1 hour
+            
+            if encoding == 'base64':
+                # Decode base64 content
+                binary_content = base64.b64decode(content)
+                self.send_header('Content-Length', str(len(binary_content)))
+                self.end_headers()
+                self.wfile.write(binary_content)
+            else:
+                # Text content
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            
+            print(f"✅ Served asset: {asset_url} ({len(content)} bytes)")
+            
+        except Exception as e:
+            print(f"❌ Error serving asset: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_error(500, f"Asset serving error: {str(e)}")
+    
+    def rewrite_links(self, html, base_url):
+        """Rewrite links in HTML to work with offline browser - FIXED VERSION"""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            base_domain = urlparse(base_url).netloc
+            
+            # Rewrite <a> tags - FIXED LINK REWRITING
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                if href and not href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                    if href.startswith(('http://', 'https://')):
+                        # External link from same domain
+                        if base_domain in href:
+                            # Keep the full URL but route through our system
+                            link['href'] = f"/page/{href}"
+                        # External links from other domains stay as-is
+                    elif href.startswith('/'):
+                        # Absolute path - convert to full URL
+                        full_url = f"{urlparse(base_url).scheme}://{base_domain}{href}"
+                        link['href'] = f"/page/{full_url}"
+                    else:
+                        # Relative path
+                        full_url = urljoin(base_url, href)
+                        link['href'] = f"/page/{full_url}"
+            
+            # Rewrite resource links to use our asset server - FIXED ASSET REWRITING
+            self.rewrite_resource_links(soup, base_url)
+            
+            return str(soup)
+        except Exception as e:
+            print(f"❌ Error rewriting links: {e}")
+            return html  # Return original HTML if rewriting fails
+    
+    def rewrite_resource_links(self, soup, base_url):
+        """Rewrite resource links (CSS, JS, images) to use asset server - FIXED"""
+        try:
+            # Rewrite <script> tags
+            for script in soup.find_all('script', src=True):
+                src = script['src']
+                if src and not src.startswith(('data:', 'blob:', 'javascript:')):
+                    if src.startswith(('http://', 'https://')):
+                        script['src'] = f"/asset/{src}"
+                    else:
+                        full_src = urljoin(base_url, src)
+                        script['src'] = f"/asset/{full_src}"
+            
+            # Rewrite <link> tags (CSS, etc.)
+            for link in soup.find_all('link', href=True):
+                href = link['href']
+                if href and not href.startswith(('data:', 'blob:', 'javascript:')):
+                    if href.startswith(('http://', 'https://')):
+                        link['href'] = f"/asset/{href}"
+                    else:
+                        full_href = urljoin(base_url, href)
+                        link['href'] = f"/asset/{full_href}"
+            
+            # Rewrite <img> tags
+            for img in soup.find_all('img', src=True):
+                src = img['src']
+                if src and not src.startswith(('data:', 'blob:', 'javascript:')):
+                    if src.startswith(('http://', 'https://')):
+                        img['src'] = f"/asset/{src}"
+                    else:
+                        full_src = urljoin(base_url, src)
+                        img['src'] = f"/asset/{full_src}"
+            
+            # Rewrite CSS url() references in style tags
+            for style in soup.find_all('style'):
+                if style.string:
+                    style.string = re.sub(
+                        r'url\([\'"]?([^)\'"]+)[\'"]?\)',
+                        lambda m: self.rewrite_css_url(m.group(1), base_url),
+                        style.string
+                    )
+            
+            # Rewrite CSS in style attributes
+            for tag in soup.find_all(style=True):
+                if tag['style']:
+                    tag['style'] = re.sub(
+                        r'url\([\'"]?([^)\'"]+)[\'"]?\)',
+                        lambda m: self.rewrite_css_url(m.group(1), base_url),
+                        tag['style']
+                    )
+        except Exception as e:
+            print(f"❌ Error rewriting resource links: {e}")
+    
+    def rewrite_css_url(self, url, base_url):
+        """Rewrite a CSS URL to use asset server"""
+        if url.startswith(('data:', 'blob:')):
+            return f'url({url})'
+        
+        if url.startswith(('http://', 'https://')):
+            return f'url(/asset/{url})'
+        else:
+            full_url = urljoin(base_url, url)
+            return f'url(/asset/{full_url})'
 
+def start_browser(pages_directory=None, port=8000):
+    """Start the web browser server"""
+    script_dir = get_script_directory()
+    if pages_directory is None:
+        pages_directory = os.path.join(script_dir, "downloaded_sites")
+    else:
+        pages_directory = os.path.abspath(pages_directory)
+    
+    print(f"🔍 Looking for .page files in: {pages_directory}")
+    
+    # Create and configure the browser
+    browser = PageFileBrowser(pages_directory)
+    browser.load_all_page_files()
+    
+    if not browser.loaded_sites:
+        print("❌ No .page files loaded. Cannot start browser.")
+        print("💡 Make sure you run downloader.py first to download some websites!")
+        print("💡 Check that the downloaded_sites folder exists and contains .page files")
+        return
+    
+    # Set up the request handler
+    from http.server import HTTPServer
+    PageFileRequestHandler.page_browser = browser
+    
+    # Change to script directory to avoid serving system files
+    os.chdir(script_dir)
+    
+    # Start the server
+    server = HTTPServer(('localhost', port), PageFileRequestHandler)
+    
+    print(f"🌐 Starting offline browser on http://localhost:{port}")
+    print("🎨 Fixed: Links and CSS should now work!")
+    print("📂 Serving from your downloaded sites")
+    print("🛑 Press Ctrl+C to stop the server")
+    
+    # Open browser automatically
+    webbrowser.open(f'http://localhost:{port}')
+    
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down server...")
+        server.shutdown()
 
 if __name__ == "__main__":
-    print("="*60)
-    print("🚀 COMPLETE WEBSITE DOWNLOADER WITH YOUTUBE SUPPORT")
-    print("="*60)
-    
-    # Get max_pages from user
-    try:
-        max_pages_input = input(f"Enter max videos to download (default: 2): ").strip()
-        max_pages = int(max_pages_input) if max_pages_input else 2
-    except:
-        max_pages = 2
-    
-    # Check for required packages
-    try:
-        import yt_dlp
-    except ImportError:
-        print("📦 Installing yt-dlp...")
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
-        import yt_dlp
-    
-    sites = []
-    
-    if len(sys.argv) > 1:
-        sites = sys.argv[1:]
-    else:
-        user_input = input("Enter YouTube URL to download (or press Enter to exit): ").strip()
-        if user_input:
-            sites = [user_input]
-        else:
-            print("No URL provided. Exiting.")
-            sys.exit(0)
-    
-    downloader = CompleteWebsiteDownloader(max_pages=max_pages)
-    files = downloader.download_from_list(sites)
-    
-    if files:
-        print(f"\n🎉 Success! Downloaded {len(files)} items!")
-        print("💡 Run browser.py to view your downloaded videos!")
-    else:
-        print(f"\n❌ No videos downloaded. Check the URL and try again.")
+    start_browser()
