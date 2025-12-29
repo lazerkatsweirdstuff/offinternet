@@ -38,8 +38,8 @@ jobs:
 
     - name: Build executables
       run: |
-        pyinstaller --onefile --name page-browser main/page-browser.py
-        pyinstaller --onefile --name page-downloader main/page-downloader.py
+        pyinstaller --onefile --name page-browser page-browser.py
+        pyinstaller --onefile --name page-downloader page-downloader.py
 
     - name: Prepare release assets
       run: |
