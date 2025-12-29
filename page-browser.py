@@ -13,6 +13,7 @@ import tempfile
 import shutil
 import signal
 import sys
+import socket
 import threading
 
 def get_script_directory():
@@ -282,6 +283,26 @@ class PageFileBrowser:
                         return asset_data
         
         return None
+    
+    def find_asset_by_relative_path(self, path):
+        """Find an asset by relative path (e.g., /w/assets/latest/font.woff2)"""
+        # Remove leading slash if present
+        if path.startswith('/'):
+            path = path[1:]
+        
+        # Try to find asset by matching the end of the URL
+        for site_data in self.loaded_sites.values():
+            for asset_url, asset_data in site_data['assets'].items():
+                parsed = urlparse(asset_url)
+                asset_path = parsed.path
+                if asset_path.startswith('/'):
+                    asset_path = asset_path[1:]
+                
+                # Check if the path ends with our requested path
+                if asset_url.endswith(path) or asset_path == path:
+                    return asset_data
+        
+        return None
 
 class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
     page_browser = None
@@ -290,14 +311,16 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
         """Override to catch connection errors"""
         try:
             super().handle_one_request()
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError) as e:
             # Client disconnected, ignore
             print(f"⚠️ Client disconnected: {e}")
         except Exception as e:
             print(f"⚠️ Unexpected error in request handler: {e}")
+            import traceback
+            traceback.print_exc()
     
     def do_GET(self):
-        """Handle GET requests with robust error handling"""
+        """Handle GET requests with robust error handling and better routing"""
         try:
             # Parse the requested path
             path = unquote(self.path)
@@ -323,9 +346,14 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
                 self.serve_youtube_video(path)
                 return
             
-            # Handle asset requests
+            # Handle asset requests - two formats
             if path.startswith('/asset/'):
-                self.serve_asset(path)
+                self.serve_encoded_asset(path)
+                return
+            
+            # Check if it looks like a direct asset request (e.g., /w/assets/latest/font.woff2)
+            if self.looks_like_asset(path):
+                self.serve_direct_asset(path)
                 return
             
             # Handle requests for specific pages
@@ -336,17 +364,160 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
             # Default to trying to find a matching page
             self.serve_saved_page(f'/page{path}')
             
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError) as e:
             # Client disconnected, ignore
             print(f"⚠️ Client disconnected during request: {e}")
         except Exception as e:
-            print(f"❌ Server error: {e}")
+            print(f"❌ Server error in do_GET: {e}")
             import traceback
             traceback.print_exc()
             try:
                 self.send_error(500, f"Server error: {str(e)}")
             except:
                 pass  # Client may have disconnected
+    
+    def looks_like_asset(self, path):
+        """Check if a path looks like an asset request"""
+        # Common asset file extensions
+        asset_extensions = [
+            '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
+            '.woff', '.woff2', '.ttf', '.eot', '.otf', '.webp', '.mp4', '.webm',
+            '.mp3', '.wav', '.ogg', '.json', '.xml', '.pdf', '.zip'
+        ]
+        
+        # Check if path has an asset extension
+        if any(path.lower().endswith(ext) for ext in asset_extensions):
+            return True
+        
+        # Check common asset paths
+        asset_paths = [
+            '/assets/', '/static/', '/css/', '/js/', '/images/', '/img/',
+            '/fonts/', '/font/', '/media/', '/uploads/', '/w/assets/'
+        ]
+        
+        if any(path.startswith(ap) for ap in asset_paths):
+            return True
+        
+        return False
+    
+    def serve_direct_asset(self, path):
+        """Serve an asset using its direct path (e.g., /w/assets/latest/font.woff2)"""
+        try:
+            print(f"🔍 Looking for direct asset: {path}")
+            
+            # Try to find asset by relative path
+            asset_data = self.page_browser.find_asset_by_relative_path(path)
+            
+            if not asset_data:
+                # Try to construct a full URL and look for it
+                # Common pattern: if we're on discord.com page, try discord.com + path
+                referer = self.headers.get('Referer', '')
+                if referer:
+                    # Extract domain from referer
+                    parsed_referer = urlparse(referer)
+                    if parsed_referer.netloc:
+                        # Construct full URL
+                        full_url = f"{parsed_referer.scheme}://{parsed_referer.netloc}{path}"
+                        print(f"🔍 Trying constructed URL: {full_url}")
+                        asset_data = self.page_browser.find_asset_by_url(full_url)
+            
+            if not asset_data:
+                print(f"❌ Asset not found: {path}")
+                self.send_error(404, f"Asset not found: {path}")
+                return
+            
+            # Determine content type
+            content_type = asset_data.get('content_type', 'application/octet-stream')
+            encoding = asset_data.get('encoding', 'text')
+            content = asset_data['content']
+            
+            self.send_response(200)
+            self.send_header('Content-type', content_type)
+            self.send_header('Cache-Control', 'public, max-age=3600')
+            
+            if encoding == 'base64':
+                # Decode base64 content
+                binary_content = base64.b64decode(content)
+                self.send_header('Content-Length', str(len(binary_content)))
+                self.end_headers()
+                self.wfile.write(binary_content)
+            else:
+                # Text content
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            
+            print(f"✅ Served direct asset: {path} ({len(content)} bytes)")
+            
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
+            # Client disconnected, ignore
+            pass
+        except Exception as e:
+            print(f"❌ Error serving direct asset: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.send_error(500, f"Asset serving error: {str(e)}")
+            except:
+                pass
+    
+    def serve_encoded_asset(self, path):
+        """Serve an asset using encoded URL (e.g., /asset/https://example.com/style.css)"""
+        try:
+            # Extract asset URL from path: /asset/ENCODED_URL
+            encoded_url = path[7:]  # Remove '/asset/' prefix
+            
+            if not encoded_url:
+                self.send_error(404, "Asset URL not specified")
+                return
+            
+            # URL decode the asset URL
+            asset_url = unquote(encoded_url)
+            
+            print(f"🔍 Looking for encoded asset: {asset_url}")
+
+            # Find asset in loaded sites
+            asset_data = self.page_browser.find_asset_by_url(asset_url)
+
+            if not asset_data:
+                print(f"❌ Asset not found: {asset_url}")
+                self.send_error(404, f"Asset not found: {asset_url}")
+                return
+            
+            # Determine content type
+            content_type = asset_data.get('content_type', 'application/octet-stream')
+            encoding = asset_data.get('encoding', 'text')
+            content = asset_data['content']
+            
+            self.send_response(200)
+            self.send_header('Content-type', content_type)
+            self.send_header('Cache-Control', 'public, max-age=3600')
+            
+            if encoding == 'base64':
+                # Decode base64 content
+                binary_content = base64.b64decode(content)
+                self.send_header('Content-Length', str(len(binary_content)))
+                self.end_headers()
+                self.wfile.write(binary_content)
+            else:
+                # Text content
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            
+            print(f"✅ Served encoded asset: {asset_url} ({len(content)} bytes)")
+
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
+            # Client disconnected, ignore
+            pass
+        except Exception as e:
+            print(f"❌ Error serving encoded asset: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.send_error(500, f"Asset serving error: {str(e)}")
+            except:
+                pass
     
     def serve_temp_video(self, path):
         """Serve video files from temp directory with robust error handling"""
@@ -381,7 +552,6 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
             
             if range_header:
                 # Parse Range header
-                import re
                 range_match = re.search(r'bytes=(\d+)-(\d*)', range_header)
                 if range_match:
                     range_start = int(range_match.group(1))
@@ -422,7 +592,7 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
                                 break
                             self.wfile.write(chunk)
                             remaining -= len(chunk)
-                        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
                             # Client disconnected, stop streaming
                             print(f"⚠️ Client disconnected while streaming video")
                             break
@@ -443,14 +613,14 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
                             if not chunk:
                                 break
                             self.wfile.write(chunk)
-                        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
                             # Client disconnected, stop streaming
                             print(f"⚠️ Client disconnected while streaming video")
                             break
             
             print(f"✅ Served temp video: {video_filename}")
             
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
             # Client disconnected, ignore
             print(f"⚠️ Client disconnected during video streaming")
         except Exception as e:
@@ -839,7 +1009,7 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
             """
 
             self.wfile.write(html.encode('utf-8'))
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
             # Client disconnected, ignore
             pass
         except Exception as e:
@@ -878,7 +1048,7 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
                         return
             
             self.send_error(404, f"YouTube video not found: {video_domain}")
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
             # Client disconnected, ignore
             pass
         except Exception as e:
@@ -917,7 +1087,7 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
                 print(f"❌ Page not found: {requested_url}")
                 # Try to serve a nice 404 page
                 self.serve_404(requested_url)
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
             # Client disconnected, ignore
             pass
         except Exception as e:
@@ -962,70 +1132,12 @@ class RobustPageFileRequestHandler(SimpleHTTPRequestHandler):
             </html>
             """
             self.wfile.write(html.encode('utf-8'))
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
             # Client disconnected, ignore
             pass
         except Exception as e:
             print(f"❌ Error serving 404 page: {e}")
     
-    def serve_asset(self, path):
-        """Serve asset files (CSS, JS, images, etc.)"""
-        try:
-            # Extract asset URL from path: /asset/ENCODED_URL
-            encoded_url = path[7:]  # Remove '/asset/' prefix
-            
-            if not encoded_url:
-                self.send_error(404, "Asset URL not specified")
-                return
-            
-            # URL decode the asset URL
-            asset_url = unquote(encoded_url)
-            
-            print(f"🔍 Looking for asset: {asset_url}")
-
-            # Find asset in loaded sites
-            asset_data = self.page_browser.find_asset_by_url(asset_url)
-
-            if not asset_data:
-                print(f"❌ Asset not found: {asset_url}")
-                self.send_error(404, f"Asset not found: {asset_url}")
-                return
-            
-            # Determine content type
-            content_type = asset_data.get('content_type', 'application/octet-stream')
-            encoding = asset_data.get('encoding', 'text')
-            content = asset_data['content']
-            
-            self.send_response(200)
-            self.send_header('Content-type', content_type)
-            self.send_header('Cache-Control', 'public, max-age=3600')  # Cache for 1 hour
-            
-            if encoding == 'base64':
-                # Decode base64 content
-                binary_content = base64.b64decode(content)
-                self.send_header('Content-Length', str(len(binary_content)))
-                self.end_headers()
-                self.wfile.write(binary_content)
-            else:
-                # Text content
-                self.send_header('Content-Length', str(len(content)))
-                self.end_headers()
-                self.wfile.write(content.encode('utf-8'))
-            
-            print(f"✅ Served asset: {asset_url} ({len(content)} bytes)")
-
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-            # Client disconnected, ignore
-            pass
-        except Exception as e:
-            print(f"❌ Error serving asset: {e}")
-            import traceback
-            traceback.print_exc()
-            try:
-                self.send_error(500, f"Asset serving error: {str(e)}")
-            except:
-                pass  # Client may have disconnected
-
     def rewrite_links(self, html, base_url):
         """Rewrite links in HTML to work with offline browser"""
         try:
@@ -1135,6 +1247,22 @@ def signal_handler(sig, frame):
     print("\n👋 Shutting down server...")
     sys.exit(0)
 
+class ThreadingHTTPServer(HTTPServer):
+    """Simple threaded HTTP server that handles connections in separate threads"""
+    def process_request(self, request, client_address):
+        """Start a new thread to process the request"""
+        thread = threading.Thread(target=self.__process_request_thread,
+                                  args=(request, client_address))
+        thread.daemon = True
+        thread.start()
+    
+    def __process_request_thread(self, request, client_address):
+        """Process request in a thread"""
+        try:
+            HTTPServer.process_request(self, request, client_address)
+        except Exception as e:
+            print(f"⚠️ Error in request thread: {e}")
+
 def start_browser(pages_directory=None, port=8000):
     """Start the web browser server with robust error handling"""
     # Set up signal handler for Ctrl+C
@@ -1167,13 +1295,17 @@ def start_browser(pages_directory=None, port=8000):
     # Start the server with robust error handling
     server = None
     try:
-        server = HTTPServer(('localhost', port), RobustPageFileRequestHandler)
-        server.timeout = 1  # Set a timeout so we can check for KeyboardInterrupt
+        # Use threaded server for better stability
+        server = ThreadingHTTPServer(('localhost', port), RobustPageFileRequestHandler)
+        
+        # Set socket options for better stability
+        server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
         print(f"🌐 Starting offline browser on http://localhost:{port}")
         print("✅ Regular websites and YouTube videos should now work!")
         print("✅ CSS, JavaScript, and images should load properly")
         print("✅ Server is now robust against connection errors!")
+        print("✅ Using threaded server for better stability!")
         print("🛑 Press Ctrl+C to stop the server")
         
         # Open browser automatically
@@ -1182,16 +1314,9 @@ def start_browser(pages_directory=None, port=8000):
         except:
             print(f"⚠️ Could not open browser automatically. Please visit: http://localhost:{port}")
         
-        # Main server loop with error handling
-        while True:
-            try:
-                server.handle_request()
-            except KeyboardInterrupt:
-                print("\n👋 Shutting down server...")
-                break
-            except Exception as e:
-                print(f"⚠️ Unexpected server error: {e}")
-                # Continue serving despite errors
+        # Main server loop
+        print("🚀 Server is running...")
+        server.serve_forever()
         
     except OSError as e:
         if "Address already in use" in str(e):
@@ -1199,14 +1324,20 @@ def start_browser(pages_directory=None, port=8000):
             print(f"   python browser.py --port 8080")
         else:
             print(f"❌ Server error: {e}")
+            import traceback
+            traceback.print_exc()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down server...")
     except Exception as e:
         print(f"❌ Unexpected error starting server: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         # Clean up
         if server:
             server.server_close()
         # Clean up temp directory
-        if os.path.exists(browser.temp_dir):
+        if hasattr(browser, 'temp_dir') and os.path.exists(browser.temp_dir):
             try:
                 shutil.rmtree(browser.temp_dir)
                 print(f"🧹 Cleaned up temp directory: {browser.temp_dir}")
