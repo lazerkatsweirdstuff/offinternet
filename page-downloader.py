@@ -19,9 +19,554 @@ import gzip
 import brotli
 from PIL import Image
 import io
+import yt_dlp
+
+class YouTubeDownloader:
+    def __init__(self, output_dir=None, max_pages=10):
+        # Create temp directory for videos while program runs
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if output_dir is None:
+            output_dir = os.path.join(script_dir, "youtube_videos")
+        
+        # Create temp folder if it doesn't exist
+        self.temp_dir = os.path.join(output_dir, "temp")
+        if not os.path.exists(self.temp_dir):
+            os.makedirs(self.temp_dir, exist_ok=True)
+        
+        self.output_dir = output_dir
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir, exist_ok=True)
+        
+        self.max_pages = max_pages
+        self.downloaded_videos = set()
+        self.suggested_queue = deque()
+        
+        # SIMPLIFIED: Just download the best available format
+        self.ydl_opts = {
+            'format': 'best[ext=mp4]/best[height<=720]/best',  # Prefer MP4, then 720p or lower
+            'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),  # Use temp dir
+            'quiet': True,
+            'no_warnings': True,
+            'writeinfojson': True,
+            'writethumbnail': True,
+        }
+        
+        # Initialize session
+        self.session = requests.Session()
+        self.ua = UserAgent()
+        self.update_headers()
+    
+    def update_headers(self):
+        """Update session headers with random user agent"""
+        headers = {
+            'User-Agent': self.ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        self.session.headers.update(headers)
+    
+    def get_suggested_videos(self, video_id, max_results=20):
+        """Get suggested videos from YouTube"""
+        suggested_videos = []
+        
+        try:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            response = self.session.get(url, timeout=10)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                for link in soup.find_all('a', href=True):
+                    href = link.get('href', '')
+                    if '/watch?v=' in href and 'list=' not in href:
+                        video_id_match = re.search(r'v=([a-zA-Z0-9_-]{11})', href)
+                        if video_id_match:
+                            suggested_id = video_id_match.group(1)
+                            if suggested_id != video_id and suggested_id not in self.downloaded_videos:
+                                video_title = link.get_text(strip=True) or f"Video {suggested_id}"
+                                suggested_videos.append({
+                                    'id': suggested_id,
+                                    'title': video_title[:100],
+                                    'url': f"https://www.youtube.com/watch?v={suggested_id}"
+                                })
+                                if len(suggested_videos) >= max_results:
+                                    break
+            
+            return suggested_videos[:max_results]
+            
+        except Exception as e:
+            print(f"   ⚠️ Error fetching suggested videos: {e}")
+            return []
+    
+    def download_video_simple(self, url, depth=0):
+        """Simplified video download without complex processing"""
+        if depth >= self.max_pages:
+            return None
+            
+        video_id = None
+        try:
+            # Extract video ID
+            if 'youtube.com/watch?v=' in url:
+                video_id = url.split('v=')[1].split('&')[0]
+            elif 'youtu.be/' in url:
+                video_id = url.split('youtu.be/')[1].split('?')[0]
+            
+            if not video_id or len(video_id) != 11:
+                print(f"❌ Invalid YouTube URL: {url}")
+                return None
+            
+            if video_id in self.downloaded_videos:
+                return None
+            
+            print(f"\n🎬 Downloading YouTube video ({depth+1}/{self.max_pages}):")
+            print(f"   🔗 URL: {url}")
+            print(f"   🆔 Video ID: {video_id}")
+            
+            # Get video info
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get('title', f'Video {video_id}')
+                channel = info.get('uploader', 'Unknown Channel')
+                duration = info.get('duration', 0)
+                
+                print(f"   📹 Title: {title}")
+                print(f"   👤 Channel: {channel}")
+                print(f"   ⏱️ Duration: {duration}s")
+            
+            # Download with progress
+            def progress_hook(d):
+                if d['status'] == 'downloading':
+                    percent = d.get('_percent_str', '0%').strip()
+                    speed = d.get('_speed_str', 'N/A')
+                    print(f"   📥 Downloading: {percent} at {speed}", end='\r')
+                elif d['status'] == 'finished':
+                    print(f"   ✅ Download complete!                     ")
+            
+            download_opts = self.ydl_opts.copy()
+            download_opts['progress_hooks'] = [progress_hook]
+            
+            with yt_dlp.YoutubeDL(download_opts) as ydl:
+                info_dict = ydl.extract_info(url, download=True)
+                if not info_dict:
+                    print(f"   ❌ Failed to download video: {url}")
+                    return None
+                
+                # Find downloaded file in temp directory
+                video_file = None
+                info_file = None
+                thumb_file = None
+                
+                # Look for files in temp directory
+                for file in os.listdir(self.temp_dir):
+                    if file.startswith(video_id):
+                        file_path = os.path.join(self.temp_dir, file)
+                        if file.endswith('.json'):
+                            info_file = file_path
+                        elif file.endswith(('.webp', '.jpg', '.png', '.jpeg')):
+                            thumb_file = file_path
+                        elif any(file.endswith(ext) for ext in ['.mp4', '.webm', '.mkv', '.flv', '.avi']):
+                            video_file = file_path
+                
+                if not video_file:
+                    print(f"   ❌ No video file found for {video_id}")
+                    # Try to find by video filename from info_dict
+                    if info_dict.get('requested_downloads'):
+                        for download in info_dict['requested_downloads']:
+                            if download.get('filepath'):
+                                video_file = download['filepath']
+                                break
+                
+                if not video_file:
+                    print(f"   ❌ Could not locate video file for {video_id}")
+                    return None
+                
+                # Get file info
+                file_size = os.path.getsize(video_file)
+                file_ext = os.path.splitext(video_file)[1].lower().lstrip('.')
+                
+                print(f"   💾 File: {os.path.basename(video_file)} ({file_size/1024/1024:.1f} MB)")
+                
+                # Move files from temp to output directory
+                final_video_file = os.path.join(self.output_dir, f"{video_id}.{file_ext}")
+                
+                # Copy video file
+                import shutil
+                shutil.copy2(video_file, final_video_file)
+                
+                # Copy info file if exists
+                final_info_file = None
+                if info_file:
+                    final_info_file = os.path.join(self.output_dir, f"{video_id}.info.json")
+                    shutil.copy2(info_file, final_info_file)
+                
+                # Copy thumbnail if exists
+                final_thumb_file = None
+                if thumb_file:
+                    thumb_ext = os.path.splitext(thumb_file)[1]
+                    final_thumb_file = os.path.join(self.output_dir, f"{video_id}{thumb_ext}")
+                    shutil.copy2(thumb_file, final_thumb_file)
+                
+                # Clean up temp files
+                try:
+                    for file in os.listdir(self.temp_dir):
+                        if file.startswith(video_id):
+                            os.remove(os.path.join(self.temp_dir, file))
+                except Exception as e:
+                    print(f"   ⚠️ Could not clean up temp files: {e}")
+                
+                # Mark as downloaded
+                self.downloaded_videos.add(video_id)
+                
+                # Get suggested videos
+                if depth < self.max_pages - 1:
+                    suggested_videos = self.get_suggested_videos(video_id, max_results=3)
+                    for suggested in suggested_videos:
+                        if suggested['id'] not in self.downloaded_videos:
+                            self.suggested_queue.append({
+                                'url': suggested['url'],
+                                'depth': depth + 1,
+                                'parent_id': video_id
+                            })
+                
+                return {
+                    'success': True,
+                    'video_id': video_id,
+                    'title': title,
+                    'channel': channel,
+                    'duration': duration,
+                    'video_file': final_video_file,
+                    'video_filename': os.path.basename(final_video_file),
+                    'file_size': file_size,
+                    'file_ext': file_ext,
+                    'original_url': url,
+                    'depth': depth,
+                    'info_file': final_info_file,
+                    'thumb_file': final_thumb_file
+                }
+                
+        except Exception as e:
+            print(f"\n❌ YouTube download error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def create_embedded_page(self, video_data, page_number=1):
+        """Create HTML page with embedded video - using local file reference"""
+        video_id = video_data['video_id']
+        title = video_data['title']
+        channel = video_data['channel']
+        duration = video_data['duration']
+        video_filename = video_data['video_filename']
+        
+        # Format duration
+        if duration:
+            hours = duration // 3600
+            minutes = (duration % 3600) // 60
+            seconds = duration % 60
+            if hours > 0:
+                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+            else:
+                duration_str = f"{minutes}:{seconds:02d}"
+        else:
+            duration_str = "0:00"
+        
+        # Format file size
+        file_size = video_data.get('file_size', 0)
+        if file_size > 1024*1024:
+            size_str = f"{file_size/1024/1024:.1f} MB"
+        elif file_size > 1024:
+            size_str = f"{file_size/1024:.1f} KB"
+        else:
+            size_str = f"{file_size} bytes"
+        
+        file_ext = video_data.get('file_ext', 'mp4').upper()
+        
+        # Use local file reference instead of base64
+        html_template = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title} - YouTube</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 20px;
+            background: #0f0f0f;
+            color: white;
+            font-family: Arial, sans-serif;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+        }}
+        .header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #333;
+        }}
+        .logo {{
+            color: red;
+            font-size: 24px;
+            font-weight: bold;
+            margin-right: 20px;
+        }}
+        .search {{
+            flex: 1;
+            padding: 8px 15px;
+            background: #121212;
+            border: 1px solid #303030;
+            border-radius: 20px;
+            color: white;
+        }}
+        .video-container {{
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }}
+        video {{
+            width: 100%;
+            max-height: 720px;
+        }}
+        .video-title {{
+            font-size: 20px;
+            font-weight: bold;
+            margin: 15px 0;
+        }}
+        .video-info {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            color: #aaa;
+            font-size: 14px;
+        }}
+        .actions {{
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }}
+        .btn {{
+            padding: 8px 15px;
+            background: #272727;
+            border: none;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+        }}
+        .subscribe {{
+            background: #cc0000;
+        }}
+        .download-info {{
+            background: #272727;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #aaa;
+        }}
+        @media (max-width: 768px) {{
+            .video-info {{
+                flex-direction: column;
+                gap: 10px;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">YouTube</div>
+            <input type="text" class="search" placeholder="Search" value="{title}">
+        </div>
+        
+        <div class="video-container">
+            <video controls autoplay>
+                <source src="video.mp4" type="video/mp4">
+                Your browser does not support HTML5 video.
+            </video>
+        </div>
+        
+        <div class="video-title">{title}</div>
+        
+        <div class="video-info">
+            <div>
+                <strong>{channel}</strong> • {duration_str} • {size_str}
+            </div>
+            <div>
+                Format: {file_ext} • Page: {page_number}/{self.max_pages}
+            </div>
+        </div>
+        
+        <div class="actions">
+            <button class="btn subscribe">SUBSCRIBE</button>
+            <button class="btn">LIKE</button>
+            <button class="btn">SHARE</button>
+            <button class="btn">SAVE</button>
+        </div>
+        
+        <div class="download-info">
+            <p>📥 Downloaded using YouTube Downloader • Video ID: {video_id}</p>
+            <p>🎬 Original URL: {video_data['original_url']}</p>
+            <p>⏰ Downloaded: {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
+        </div>
+    </div>
+    
+    <script>
+        // Auto-play the video
+        document.addEventListener('DOMContentLoaded', function() {{
+            const video = document.querySelector('video');
+            video.play().catch(e => console.log('Auto-play prevented:', e));
+            
+            // Save playback position
+            video.addEventListener('timeupdate', function() {{
+                localStorage.setItem('yt_{video_id}_time', video.currentTime);
+            }});
+            
+            // Restore playback position
+            const savedTime = localStorage.getItem('yt_{video_id}_time');
+            if (savedTime) {{
+                video.currentTime = parseFloat(savedTime);
+            }}
+        }});
+    </script>
+</body>
+</html>'''
+        return html_template
+    
+    def save_as_page_file(self, video_data, page_number, total_pages):
+        """Save the YouTube video as a .page file - FIXED ENCODING"""
+        try:
+            # Create simple metadata
+            metadata = {
+                'video_id': video_data['video_id'],
+                'title': video_data['title'],
+                'channel': video_data['channel'],
+                'duration': video_data['duration'],
+                'original_url': video_data['original_url'],
+                'page_number': page_number,
+                'total_pages': total_pages,
+                'timestamp': time.time(),
+                'type': 'youtube_video',
+                'file_size': video_data.get('file_size', 0),
+                'file_format': video_data.get('file_ext', 'mp4'),
+            }
+            
+            # Create safe filename
+            safe_title = re.sub(r'[^\w\-_\. ]', '_', video_data['title'])[:50]
+            filename = f"youtube_{video_data['video_id']}_{page_number}_{safe_title}.page"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Save metadata with explicit UTF-8 encoding
+                metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
+                zipf.writestr('metadata.json', metadata_json.encode('utf-8'))
+                
+                # Save HTML with explicit UTF-8 encoding
+                html_content = self.create_embedded_page(video_data, page_number)
+                zipf.writestr('index.html', html_content.encode('utf-8'))
+                
+                # Save video file directly
+                video_file = video_data['video_file']
+                if os.path.exists(video_file):
+                    zipf.write(video_file, 'video.mp4')
+                
+                # Save video info if exists
+                info_file = video_data.get('info_file')
+                if info_file and os.path.exists(info_file):
+                    with open(info_file, 'r', encoding='utf-8') as f:
+                        video_info = json.load(f)
+                        video_info_json = json.dumps(video_info, indent=2, ensure_ascii=False)
+                        zipf.writestr('video_info.json', video_info_json.encode('utf-8'))
+                
+                # Save thumbnail if exists
+                thumb_file = video_data.get('thumb_file')
+                if thumb_file and os.path.exists(thumb_file):
+                    with open(thumb_file, 'rb') as f:
+                        thumb_data = f.read()
+                        zipf.writestr('thumbnail' + os.path.splitext(thumb_file)[1], thumb_data)
+            
+            print(f"💾 Saved: {filename}")
+            return filepath
+            
+        except Exception as e:
+            print(f"❌ Error saving .page file: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def download_youtube_with_suggestions(self, start_url):
+        """Main download method"""
+        print(f"\n{'='*60}")
+        print(f"🎬 YOUTUBE DOWNLOADER")
+        print(f"📊 Max videos: {self.max_pages}")
+        print(f"📁 Output: {self.output_dir}")
+        print(f"📁 Temp: {self.temp_dir}")
+        print("="*60)
+        
+        downloaded_files = []
+        
+        # Add starting URL
+        self.suggested_queue.append({
+            'url': start_url,
+            'depth': 0,
+            'parent_id': None
+        })
+        
+        current_page = 1
+        
+        while self.suggested_queue and current_page <= self.max_pages:
+            next_video = self.suggested_queue.popleft()
+            url = next_video['url']
+            
+            print(f"\n📄 Downloading video {current_page}/{self.max_pages}")
+            
+            # Download the video
+            video_data = self.download_video_simple(url, next_video['depth'])
+            
+            if video_data and video_data.get('success'):
+                # Save as .page file
+                page_file = self.save_as_page_file(video_data, current_page, self.max_pages)
+                if page_file:
+                    downloaded_files.append({
+                        'file': page_file,
+                        'title': video_data['title'],
+                        'video_id': video_data['video_id']
+                    })
+                
+                current_page += 1
+            else:
+                print(f"❌ Failed to download: {url}")
+            
+            # Small delay between downloads
+            if current_page <= self.max_pages:
+                time.sleep(2)
+        
+        # Clean up temp directory
+        try:
+            import shutil
+            shutil.rmtree(self.temp_dir)
+            print(f"🧹 Cleaned up temp directory: {self.temp_dir}")
+        except Exception as e:
+            print(f"⚠️ Could not clean up temp directory: {e}")
+        
+        # Summary
+        print(f"\n{'='*60}")
+        print(f"📊 DOWNLOAD SUMMARY")
+        print(f"📁 Downloaded {len(downloaded_files)} videos")
+        print(f"📂 Location: {self.output_dir}")
+        
+        for item in downloaded_files:
+            print(f"   • {item['title']}")
+        
+        print("="*60)
+        
+        return downloaded_files
+
 
 class CompleteWebsiteDownloader:
-    def __init__(self, output_dir=None):
+    def __init__(self, output_dir=None, max_pages=10):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if output_dir is None:
             self.output_dir = os.path.join(script_dir, "downloaded_sites")
@@ -29,6 +574,15 @@ class CompleteWebsiteDownloader:
             self.output_dir = os.path.abspath(output_dir)
             
         print(f"📁 Save location: {self.output_dir}")
+        
+        self.max_pages = max_pages
+        
+        # Initialize YouTube downloader
+        youtube_output_dir = os.path.join(self.output_dir, "youtube_videos")
+        self.youtube_downloader = YouTubeDownloader(
+            output_dir=youtube_output_dir,
+            max_pages=self.max_pages
+        )
         
         # Initialize session with better headers
         self.session = requests.Session()
@@ -39,7 +593,6 @@ class CompleteWebsiteDownloader:
         self.visited_urls = set()
         self.pages_to_crawl = deque()
         self.failed_urls = set()
-        self.max_pages = 10
         self.crawl_delay = random.uniform(1, 2)
         self.max_retries = 3
         
@@ -49,7 +602,7 @@ class CompleteWebsiteDownloader:
         self.other_assets = ['.gif', '.webp', '.mp4', '.webm', '.json', '.xml']
         
         if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
+            os.makedirs(self.output_dir, exist_ok=True)
             print(f"✅ Created directory: {self.output_dir}")
 
     def is_valid_url(self, url):
@@ -765,23 +1318,29 @@ class CompleteWebsiteDownloader:
                         downloaded_content['assets'][asset_url] = asset_data
 
     def download_website(self, url):
-        """Main download method"""
-        print(f"⬇️ Target: {url}")
-        
-        # Manual Cloudflare solve
-        if not self.manual_cloudflare_solve(url):
-            print("❌ Failed to setup Chrome session")
-            return None
-        
-        # Download with complete approach
-        result = self.download_with_session_complete(url)
-        
-        # Cleanup
-        if self.driver:
-            self.driver.quit()
-            self.driver = None
-        
-        return result
+        """Main download method - now handles YouTube specially"""
+        # Check if URL is YouTube
+        if 'youtube.com' in url or 'youtu.be' in url:
+            print("🎬 YouTube URL detected - using YouTube downloader")
+            return self.youtube_downloader.download_youtube_with_suggestions(url)
+        else:
+            # Use existing website downloader for other sites
+            print(f"⬇️ Target: {url}")
+            
+            # Manual Cloudflare solve
+            if not self.manual_cloudflare_solve(url):
+                print("❌ Failed to setup Chrome session")
+                return None
+            
+            # Download with complete approach
+            result = self.download_with_session_complete(url)
+            
+            # Cleanup
+            if self.driver:
+                self.driver.quit()
+                self.driver = None
+            
+            return result
 
     def download_with_session_complete(self, url):
         """Download using complete approach"""
@@ -838,17 +1397,20 @@ class CompleteWebsiteDownloader:
                     'assets': len(content['assets']),
                     'failed_urls': list(self.failed_urls)
                 }
-                zipf.writestr('metadata.json', json.dumps(metadata, indent=2))
+                metadata_json = json.dumps(metadata, indent=2, ensure_ascii=False)
+                zipf.writestr('metadata.json', metadata_json.encode('utf-8'))
                 
                 # Pages
                 for url, data in content['pages'].items():
                     hash_val = hashlib.md5(url.encode()).hexdigest()[:12]
-                    zipf.writestr(f"pages/{hash_val}.json", json.dumps(data, indent=2))
+                    page_json = json.dumps(data, indent=2, ensure_ascii=False)
+                    zipf.writestr(f"pages/{hash_val}.json", page_json.encode('utf-8'))
                 
                 # Assets
                 for url, data in content['assets'].items():
                     hash_val = hashlib.md5(url.encode()).hexdigest()[:12]
-                    zipf.writestr(f"assets/{hash_val}.json", json.dumps(data, indent=2))
+                    asset_json = json.dumps(data, indent=2, ensure_ascii=False)
+                    zipf.writestr(f"assets/{hash_val}.json", asset_json.encode('utf-8'))
             
             file_size = os.path.getsize(filepath) / (1024 * 1024)
             print(f"    💾 File size: {file_size:.2f} MB")
@@ -875,12 +1437,16 @@ class CompleteWebsiteDownloader:
             
             try:
                 start_time = time.time()
-                filepath = self.download_website(url)
+                result = self.download_website(url)
                 end_time = time.time()
                 
-                if filepath:
-                    downloaded_files.append(filepath)
-                    print(f"✅ Success! ({end_time - start_time:.1f}s) - Downloaded {len(downloaded_files)} sites")
+                if result:
+                    if isinstance(result, list):  # YouTube returns list of files
+                        downloaded_files.extend(result)
+                        print(f"✅ YouTube: Downloaded {len(result)} videos ({end_time - start_time:.1f}s)")
+                    else:  # Regular website returns single file path
+                        downloaded_files.append(result)
+                        print(f"✅ Success! ({end_time - start_time:.1f}s)")
                 else:
                     print(f"❌ Failed after {end_time - start_time:.1f}s")
                     
@@ -890,54 +1456,50 @@ class CompleteWebsiteDownloader:
                 traceback.print_exc()
         
         print(f"\n{'='*60}")
-        print(f"📊 Complete: {len(downloaded_files)}/{len(url_list)} sites")
+        print(f"📊 Complete: {len(downloaded_files)} items downloaded")
         print(f"💾 Location: {self.output_dir}")
         
         return downloaded_files
 
+
 if __name__ == "__main__":
     print("="*60)
-    print("🚀 RELAXED WEBSITE DOWNLOADER - PERMISSIVE URL FILTERING")
-    print("📥 Downloads most URLs, only filters obvious junk")
-    print("🛡️ Better for sites like CSS Zen Garden")
+    print("🚀 COMPLETE WEBSITE DOWNLOADER WITH YOUTUBE SUPPORT")
     print("="*60)
     
-    # Install required packages if not present
+    # Get max_pages from user
     try:
-        from fake_useragent import UserAgent
-        import brotli
-        from PIL import Image
-    except ImportError:
-        print("📦 Installing required packages...")
-        import subprocess
-        packages = ['fake-useragent', 'brotli', 'pillow']
-        for package in packages:
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-                print(f"✅ Installed {package}")
-            except:
-                print(f"⚠️ Failed to install {package}")
-        
-        from fake_useragent import UserAgent
-        import brotli
-        from PIL import Image
+        max_pages_input = input(f"Enter max pages/videos to download (default: 2): ").strip()
+        max_pages = int(max_pages_input) if max_pages_input else 2
+    except:
+        max_pages = 2
     
-    sites = [
-        "https://csszengarden.com/220/",
-    ]
+    # Check for required packages
+    try:
+        import yt_dlp
+    except ImportError:
+        print("📦 Installing yt-dlp...")
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
+        import yt_dlp
+    
+    sites = []
     
     if len(sys.argv) > 1:
         sites = sys.argv[1:]
     else:
-        user_input = input("Enter websites to download (comma-separated, or press Enter for default): ").strip()
+        user_input = input("Enter URL to download (or press Enter to exit): ").strip()
         if user_input:
-            sites = [site.strip() for site in user_input.split(',')]
+            sites = [user_input]
+        else:
+            print("No URL provided. Exiting.")
+            sys.exit(0)
     
-    downloader = CompleteWebsiteDownloader()
+    downloader = CompleteWebsiteDownloader(max_pages=max_pages)
     files = downloader.download_from_list(sites)
     
     if files:
-        print(f"\n🎉 Success! Downloaded sites with relaxed filtering!")
-        print("💡 Now run the browser.py to view your downloaded sites!")
+        print(f"\n🎉 Success! Downloaded {len(files)} items!")
+        print("💡 Run browser.py to view your downloaded videos!")
     else:
-        print(f"\n❌ No sites downloaded")
+        print(f"\n❌ No videos downloaded. Check the URL and try again.")
