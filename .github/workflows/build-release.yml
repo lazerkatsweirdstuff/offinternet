@@ -20,12 +20,11 @@ jobs:
     - name: Get version from git tag
       id: get_version
       run: |
-        $tag = git describe --tags --abbrev=0 2>$null
-        if ($LASTEXITCODE -ne 0) {
-          $tag = "v1.0.0"
-        }
-        echo "VERSION=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
-        echo "version=$tag" >> $GITHUB_OUTPUT
+        git describe --tags --abbrev=0 > tag.txt 2>nul || echo v1.0.0 > tag.txt
+        set /p VERSION=<tag.txt
+        echo VERSION=%VERSION%
+        echo "::set-output name=version::%VERSION%"
+      shell: cmd
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -36,7 +35,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-        # Add any other dependencies here
 
     - name: Build executables
       run: |
@@ -45,19 +43,17 @@ jobs:
 
     - name: Prepare release assets
       run: |
-        # Create versioned folder
-        mkdir "page-tools-${{ env.VERSION }}"
-        copy dist\page-browser.exe "page-tools-${{ env.VERSION }}\"
-        copy dist\page-downloader.exe "page-tools-${{ env.VERSION }}\"
-        # Add README or other files
-        7z a "page-tools-${{ env.VERSION }}.zip" "page-tools-${{ env.VERSION }}\*"
+        mkdir release-files
+        copy dist\page-browser.exe release-files\
+        copy dist\page-downloader.exe release-files\
+        7z a "page-tools-${{ steps.get_version.outputs.version }}.zip" release-files\*
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
       if: success()
       with:
         files: |
-          page-tools-${{ env.VERSION }}.zip
-        name: Release ${{ env.VERSION }}
-        tag_name: ${{ env.VERSION }}
+          page-tools-${{ steps.get_version.outputs.version }}.zip
+        name: Release ${{ steps.get_version.outputs.version }}
+        tag_name: ${{ steps.get_version.outputs.version }}
         generate_release_notes: true
