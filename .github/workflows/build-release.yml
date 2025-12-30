@@ -16,6 +16,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -32,21 +33,22 @@ jobs:
         pyinstaller --onefile --name page-browser page-browser.py
         pyinstaller --onefile --name page-downloader page-downloader.py
 
-- name: Prepare and upload executables to repository
-  run: |
-    # Create the executables directory if it doesn't exist
-    mkdir -p executables
-    
-    # Copy the built executables to the target names
-    cp dist/page-browser.exe executables/1.exe
-    cp dist/page-downloader.exe executables/2.exe
-    
-    # Configure git
-    git config --global user.name "GitHub Actions Bot"
-    git config --global user.email "github-actions[bot]@users.noreply.github.com"
-    
-    # Add the executables directory
-    git add executables/
-    
-    # Check if there are changes to commit
-    git diff --staged --quiet || (git commit -m "Update executables [skip ci]" && git push origin HEAD:main)
+    - name: Prepare and upload executables to repository
+      run: |
+        # Create the executables directory if it doesn't exist
+        mkdir -p executables
+        
+        # Copy the built executables to the target names
+        cp dist/page-browser.exe executables/1.exe
+        cp dist/page-downloader.exe executables/2.exe
+        
+        # Configure git
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Add the executables directory
+        git add executables/
+        
+        # Check if there are changes to commit
+        git diff --staged --quiet || (git commit -m "Update executables [skip ci]" && git push origin HEAD:main)
+      shell: bash
