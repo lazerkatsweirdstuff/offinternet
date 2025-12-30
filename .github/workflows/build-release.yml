@@ -55,13 +55,13 @@ jobs:
         copy dist\page-downloader.exe release-files\
         7z a "page-tools-${{ steps.get_version.outputs.version }}.zip" release-files\*
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-      with:
-        files: |
-          page-tools-${{ steps.get_version.outputs.version }}.zip
-        name: Release ${{ steps.get_version.outputs.version }}
-        tag_name: ${{ steps.get_version.outputs.version }}
-        generate_release_notes: true
-        token: ${{ secrets.GITHUB_TOKEN }}
+- name: Create Release
+  uses: softprops/action-gh-release@v1
+  if: success() && github.ref == 'refs/heads/main'
+  with:
+    files: |
+      page-tools-${{ steps.get_version.outputs.version }}.zip
+    name: Release ${{ steps.get_version.outputs.version }}
+    tag_name: main-latest # Use a consistent tag name
+    generate_release_notes: true
+    overwrite: true # This updates the existing 'main-latest' release
