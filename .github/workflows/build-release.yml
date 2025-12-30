@@ -24,13 +24,13 @@ jobs:
       run: |
         # Check if this is triggered by a tag push
         if [ -n "${{ github.ref_type }}" ] && [ "${{ github.ref_type }}" = "tag" ]; then
-          echo "TAG_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
-          echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          TAG_NAME="${{ github.ref_name }}"
         else
-          # For branch pushes, use a default version
-          echo "TAG_NAME=v1.0.0-${{ github.run_number }}" >> $GITHUB_ENV
-          echo "version=v1.0.0-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          # For branch pushes, use a default version with run number
+          TAG_NAME="v1.0.0-${{ github.run_number }}"
         fi
+        echo "TAG_NAME=$TAG_NAME"
+        echo "version=$TAG_NAME" >> $GITHUB_OUTPUT
       shell: bash
 
     - name: Set up Python
@@ -55,13 +55,11 @@ jobs:
         copy dist\page-downloader.exe release-files\
         7z a "page-tools-${{ steps.get_version.outputs.version }}.zip" release-files\*
 
-- name: Create Release
-  uses: softprops/action-gh-release@v1
-  if: success() && github.ref == 'refs/heads/main'
-  with:
-    files: |
-      page-tools-${{ steps.get_version.outputs.version }}.zip
-    name: Release ${{ steps.get_version.outputs.version }}
-    tag_name: main-latest # Use a consistent tag name
-    generate_release_notes: true
-    overwrite: true # This updates the existing 'main-latest' release
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/v')
+      with:
+        files: page-tools-${{ steps.get_version.outputs.version }}.zip
+        name: Release ${{ steps.get_version.outputs.version }}
+        tag_name: ${{ steps.get_version.outputs.version }}
+        generate_release_notes: true
