@@ -1,9 +1,7 @@
-name: Build and Release Executables
+name: Build and Update Executables
 
 on:
   push:
-    tags:
-      - 'v*'  # Trigger on version tags
     branches: [ main ]
 
 permissions:
@@ -18,20 +16,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-
-    - name: Get version from git tag
-      id: get_version
-      run: |
-        # Check if this is triggered by a tag push
-        if [ -n "${{ github.ref_type }}" ] && [ "${{ github.ref_type }}" = "tag" ]; then
-          TAG_NAME="${{ github.ref_name }}"
-        else
-          # For branch pushes, use a default version with run number
-          TAG_NAME="v1.0.0-${{ github.run_number }}"
-        fi
-        echo "TAG_NAME=$TAG_NAME"
-        echo "version=$TAG_NAME" >> $GITHUB_OUTPUT
-      shell: bash
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -48,18 +32,22 @@ jobs:
         pyinstaller --onefile --name page-browser page-browser.py
         pyinstaller --onefile --name page-downloader page-downloader.py
 
-    - name: Prepare release assets
+    - name: Prepare and upload executables to repository
       run: |
-        mkdir release-files
-        copy dist\page-browser.exe release-files\
-        copy dist\page-downloader.exe release-files\
-        7z a "page-tools-${{ steps.get_version.outputs.version }}.zip" release-files\*
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/v')
-      with:
-        files: page-tools-${{ steps.get_version.outputs.version }}.zip
-        name: Release ${{ steps.get_version.outputs.version }}
-        tag_name: ${{ steps.get_version.outputs.version }}
-        generate_release_notes: true
+        # Create the executables directory if it doesn't exist
+        mkdir -p executables
+        
+        # Copy the built executables to the target names
+        copy dist\page-browser.exe executables\1.exe
+        copy dist\page-downloader.exe executables\2.exe
+        
+        # Configure git
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Add the executables directory
+        git add executables/
+        
+        # Check if there are changes to commit
+        git diff --staged --quiet || (git commit -m "Update executables [skip ci]" && git push origin HEAD:main)
+      shell: bash
