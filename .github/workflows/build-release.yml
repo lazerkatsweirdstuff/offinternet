@@ -26,6 +26,20 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        # Core dependencies
+        pip install beautifulsoup4>=4.12.0
+        pip install requests>=2.31.0
+        pip install selenium>=4.15.0
+        pip install fake-useragent>=1.4.0
+        pip install yt-dlp>=2024.4.9
+        pip install Pillow>=10.1.0
+        pip install brotli>=1.1.0
+        pip install lxml>=4.9.0
+        # Selenium WebDriver manager
+        pip install webdriver-manager>=4.0.0
+        # Optional async enhancement
+        pip install aiohttp>=3.9.0
+        # Build tool
         pip install pyinstaller
 
     - name: Build executables
