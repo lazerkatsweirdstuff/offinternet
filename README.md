@@ -33,7 +33,7 @@ OffInternet is a Python-based tool designed to cleanly and reliably save intrica
        python page-browser.py
 It will run the browser on [localhost:8000](http://localhost:8000)
 
-Pre-built executables for easier use might be available in the `executables/` directory. Still working on that though.
+Pre-built executables for easier use might be available in the [/executables](https://github.com/lazerkatsweirdstuff/offinternet/tree/main/executables) directory. They are a work in progress so maybe just use the python version.
 
 ## Contributing
 
