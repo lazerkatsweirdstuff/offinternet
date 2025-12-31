@@ -42,26 +42,24 @@ jobs:
         # Build tool
         pip install pyinstaller
 
-    - name: Create PyInstaller hook for fake_useragent
+    - name: Build executables with explicit data inclusion
       run: |
-        @echo off
-        echo from PyInstaller.utils.hooks import collect_data_files > hook-fake_useragent.py
-        echo datas = collect_data_files('fake_useragent') >> hook-fake_useragent.py
-
-    - name: Build executables with hook
-      run: |
+        # First, let's find the fake_useragent data path
+        $fakeUserAgentPath = python -c "import fake_useragent; import os; print(os.path.dirname(fake_useragent.__file__))"
+        $dataPath = Join-Path $fakeUserAgentPath "data"
+        
         # Build page-browser.exe
-        pyinstaller --onefile ^
-          --name page-browser ^
-          --additional-hooks-dir=. ^
+        pyinstaller --onefile `
+          --name page-browser `
+          --add-data "$dataPath;fake_useragent/data" `
           page-browser.py
         
         # Build page-downloader.exe  
-        pyinstaller --onefile ^
-          --name page-downloader ^
-          --additional-hooks-dir=. ^
+        pyinstaller --onefile `
+          --name page-downloader `
+          --add-data "$dataPath;fake_useragent/data" `
           page-downloader.py
-      shell: cmd
+      shell: pwsh
 
     - name: Prepare and upload executables to repository
       run: |
