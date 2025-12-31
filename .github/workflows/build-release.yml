@@ -49,8 +49,20 @@ jobs:
         cp dist/page-browser.exe executables/1.exe
         cp dist/page-downloader.exe executables/2.exe
         
+        # Configure git
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Add the executables directory
         git add executables/
-        git diff --staged --quiet || (git commit -m "Update executables [skip ci]" && git push origin HEAD:main)
+        
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          # Pull latest changes before pushing
+          git pull origin main --rebase
+          git commit -m "Update executables [skip ci]"
+          git push origin HEAD:main
+        fi
       shell: bash
