@@ -13,7 +13,7 @@ OffInternet is a Python-based tool designed to cleanly and reliably save intrica
 ## Getting Started
 
 ### Prerequisites
-- Python 3.x installed on your system
+- Python 3.10+ installed on your system
 
 ### Installation & Usage
 1. Clone the repository:
