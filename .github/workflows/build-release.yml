@@ -42,18 +42,26 @@ jobs:
         # Build tool
         pip install pyinstaller
 
-    - name: Build executables
+    - name: Create PyInstaller hook for fake_useragent
       run: |
-        # Create a hook directory
-        mkdir -p hooks
+        @echo off
+        echo from PyInstaller.utils.hooks import collect_data_files > hook-fake_useragent.py
+        echo datas = collect_data_files('fake_useragent') >> hook-fake_useragent.py
+
+    - name: Build executables with hook
+      run: |
+        # Build page-browser.exe
+        pyinstaller --onefile ^
+          --name page-browser ^
+          --additional-hooks-dir=. ^
+          page-browser.py
         
-        # Create the hook file for fake_useragent
-        echo "from PyInstaller.utils.hooks import collect_data_files" > hooks/hook-fake_useragent.py
-        echo "datas = collect_data_files('fake_useragent')" >> hooks/hook-fake_useragent.py
-        
-        # Build with the additional hooks path
-        pyinstaller --onefile --name page-browser --additional-hooks-dir=hooks page-browser.py
-        pyinstaller --onefile --name page-downloader --additional-hooks-dir=hooks page-downloader.py
+        # Build page-downloader.exe  
+        pyinstaller --onefile ^
+          --name page-downloader ^
+          --additional-hooks-dir=. ^
+          page-downloader.py
+      shell: cmd
 
     - name: Prepare and upload executables to repository
       run: |
