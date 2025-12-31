@@ -67,8 +67,8 @@ jobs:
         mkdir -p executables
         
         # Copy the built executables to the target names
-        cp dist/page-browser.exe executables/1.exe
-        cp dist/page-downloader.exe executables/2.exe
+        cp dist/page-browser.exe executables/website-runner.exe
+        cp dist/page-downloader.exe executables/website-downloader.exe
         
         # Configure git
         git config --global user.name "GitHub Actions Bot"
