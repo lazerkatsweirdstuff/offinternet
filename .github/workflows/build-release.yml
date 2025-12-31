@@ -53,6 +53,15 @@ jobs:
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
+        # Stash any uncommitted changes first
+        git stash
+        
+        # Pull latest changes
+        git pull origin main
+        
+        # Apply stashed changes
+        git stash pop || true
+        
         # Add the executables directory
         git add executables/
         
@@ -60,8 +69,6 @@ jobs:
         if git diff --staged --quiet; then
           echo "No changes to commit"
         else
-          # Pull latest changes before pushing
-          git pull origin main --rebase
           git commit -m "Update executables [skip ci]"
           git push origin HEAD:main
         fi
