@@ -26,6 +26,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        # Core dependencies
         pip install beautifulsoup4>=4.12.0
         pip install requests>=2.31.0
         pip install selenium>=4.15.0
@@ -34,18 +35,24 @@ jobs:
         pip install Pillow>=10.1.0
         pip install brotli>=1.1.0
         pip install lxml>=4.9.0
+        # Selenium WebDriver manager
         pip install webdriver-manager>=4.0.0
+        # Optional async enhancement
         pip install aiohttp>=3.9.0
+        # Build tool
         pip install pyinstaller
 
     - name: Build executables
       run: |
-        pyinstaller --onefile --name page-browser --hidden-import fake_useragent.data page-browser.py
-        pyinstaller --onefile --name page-downloader --hidden-import fake_useragent.data page-downloader.py
+        pyinstaller --onefile --name page-browser page-browser.py
+        pyinstaller --onefile --name page-downloader page-downloader.py
 
     - name: Prepare and upload executables to repository
       run: |
+        # Create the executables directory if it doesn't exist
         mkdir -p executables
+        
+        # Copy the built executables to the target names
         cp dist/page-browser.exe executables/1.exe
         cp dist/page-downloader.exe executables/2.exe
         
@@ -53,23 +60,9 @@ jobs:
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Stash any uncommitted changes first
-        git stash
-        
-        # Pull latest changes
-        git pull origin main
-        
-        # Apply stashed changes
-        git stash pop || true
-        
         # Add the executables directory
         git add executables/
         
         # Check if there are changes to commit
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-        else
-          git commit -m "Update executables [skip ci]"
-          git push origin HEAD:main
-        fi
+        git diff --staged --quiet || (git commit -m "Update executables [skip ci]" && git push origin HEAD:main)
       shell: bash
