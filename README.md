@@ -86,12 +86,11 @@ Downloads a website deeply (20 pages) but skips images and stylesheets to save s
 
 ```
 offinternet/
-├── downloader.py          # Main CLI downloader
-├── page-browser.py       # Local web server for viewing .page files
-├── requirements.txt      # Python dependencies
+├── page-downloader.py   # Main downloader
+├── page-browser.py      # Local web server for viewing .page files
 ├── README.md            # This file
 ├── downloaded_sites/    # Default location for saved websites
-├── youtube_videos/      # Default location for saved YouTube videos
+|  ├── youtube_videos/      # Default location for saved YouTube videos
 └── executables/         # (Work in progress) Pre-built binaries
 ```
 
