@@ -34,9 +34,9 @@ OffInternet is a Python-based tool designed to reliably save complex web content
    pip install -r requirements.txt
    ```
 
-3. Run the downloader with a URL:
+3. Run the downloader:
    ```bash
-   python downloader.py https://example.com
+   python downloader.py
    ```
 
 4. View downloaded content:
