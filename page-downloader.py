@@ -20,9 +20,17 @@ import brotli
 from PIL import Image
 import io
 import yt_dlp
+import argparse
+import textwrap
+from typing import List, Optional
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
 
 class YouTubeDownloader:
-    def __init__(self, output_dir=None, max_pages=10):
+    def __init__(self, output_dir=None, max_pages=10, yt_format=None, yt_quality='720p'):
         # Create temp directory for videos while program runs
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if output_dir is None:
@@ -41,9 +49,15 @@ class YouTubeDownloader:
         self.downloaded_videos = set()
         self.suggested_queue = deque()
         
+        # Set format based on quality preference
+        if yt_format:
+            format_str = yt_format
+        else:
+            format_str = self._get_format_for_quality(yt_quality)
+        
         # SIMPLIFIED: Just download the best available format
         self.ydl_opts = {
-            'format': 'best[ext=mp4]/best[height<=720]/best',  # Prefer MP4, then 720p or lower
+            'format': format_str,
             'outtmpl': os.path.join(self.temp_dir, '%(id)s.%(ext)s'),  # Use temp dir
             'quiet': True,
             'no_warnings': True,
@@ -55,6 +69,17 @@ class YouTubeDownloader:
         self.session = requests.Session()
         self.ua = UserAgent()
         self.update_headers()
+    
+    def _get_format_for_quality(self, quality: str) -> str:
+        """Get format string based on quality preference"""
+        quality_map = {
+            'best': 'best[ext=mp4]/best',
+            '720p': 'best[ext=mp4]/best[height<=720]/best',
+            '480p': 'best[ext=mp4]/best[height<=480]/best',
+            '360p': 'best[ext=mp4]/best[height<=360]/best',
+            'worst': 'worst[ext=mp4]/worst',
+        }
+        return quality_map.get(quality, 'best[ext=mp4]/best[height<=720]/best')
     
     def update_headers(self):
         """Update session headers with random user agent"""
@@ -566,7 +591,7 @@ class YouTubeDownloader:
 
 
 class CompleteWebsiteDownloader:
-    def __init__(self, output_dir=None, max_pages=10):
+    def __init__(self, output_dir=None, max_pages=10, skip_assets=False):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if output_dir is None:
             self.output_dir = os.path.join(script_dir, "downloaded_sites")
@@ -576,6 +601,7 @@ class CompleteWebsiteDownloader:
         print(f"📁 Save location: {self.output_dir}")
         
         self.max_pages = max_pages
+        self.skip_assets = skip_assets
         
         # Initialize YouTube downloader
         youtube_output_dir = os.path.join(self.output_dir, "youtube_videos")
@@ -929,7 +955,8 @@ class CompleteWebsiteDownloader:
                         print(f"      🔗 Found new page: {self.get_url_display_name(link)}")
                 
                 # Download ALL assets including CSS from this page
-                self.download_all_assets_enhanced(page_data['content'], current_url, downloaded_content)
+                if not self.skip_assets:
+                    self.download_all_assets_enhanced(page_data['content'], current_url, downloaded_content)
                 
                 time.sleep(random.uniform(1, 2))
             else:
@@ -939,7 +966,8 @@ class CompleteWebsiteDownloader:
         print(f"✅ Crawl complete: {crawled_pages} pages")
         
         # Final asset discovery pass
-        self.final_asset_discovery(downloaded_content)
+        if not self.skip_assets:
+            self.final_asset_discovery(downloaded_content)
 
     def get_url_display_name(self, url):
         """Get a clean display name for URL"""
@@ -1462,44 +1490,340 @@ class CompleteWebsiteDownloader:
         return downloaded_files
 
 
-if __name__ == "__main__":
-    print("="*60)
-    print("🚀 COMPLETE WEBSITE DOWNLOADER WITH YOUTUBE SUPPORT")
-    print("="*60)
+class CLIDownloader:
+    """CLI interface for the downloader"""
     
-    # Get max_pages from user
-    try:
-        max_pages_input = input(f"Enter max pages/videos to download (default: 2): ").strip()
-        max_pages = int(max_pages_input) if max_pages_input else 2
-    except:
-        max_pages = 2
+    def __init__(self):
+        self.parser = self.create_parser()
+        self.downloader = None
+        
+    def create_parser(self) -> argparse.ArgumentParser:
+        """Create the CLI argument parser"""
+        parser = argparse.ArgumentParser(
+            description="Complete Website Downloader with YouTube Support",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=textwrap.dedent('''
+            Examples:
+              # Download a single website (interactive mode)
+              python downloader.py https://example.com
+              
+              # Download YouTube video with 5 related videos
+              python downloader.py -y https://youtube.com/watch?v=VIDEO_ID -m 5
+              
+              # Download from file list
+              python downloader.py -f urls.txt -m 10
+              
+              # Custom output directory
+              python downloader.py https://example.com -o ./my_downloads
+              
+              # Quiet mode (no interactive prompts)
+              python downloader.py https://example.com -q -m 3
+              
+              # Show verbose output
+              python downloader.py https://example.com -v
+            ''')
+        )
+        
+        # Required arguments
+        parser.add_argument(
+            'urls',
+            nargs='*',
+            help='URL(s) to download (if not provided, use -f or interactive mode)'
+        )
+        
+        # Mode selection
+        mode_group = parser.add_mutually_exclusive_group()
+        mode_group.add_argument(
+            '-y', '--youtube',
+            action='store_true',
+            help='Force YouTube mode (auto-detected if not specified)'
+        )
+        mode_group.add_argument(
+            '-w', '--website',
+            action='store_true',
+            help='Force website mode (auto-detected if not specified)'
+        )
+        
+        # File input/output
+        parser.add_argument(
+            '-f', '--file',
+            type=str,
+            help='File containing list of URLs to download (one per line)'
+        )
+        parser.add_argument(
+            '-o', '--output',
+            type=str,
+            default=None,
+            help='Output directory (default: ./downloaded_sites or ./youtube_videos)'
+        )
+        
+        # Download settings
+        parser.add_argument(
+            '-m', '--max-pages',
+            type=int,
+            default=2,
+            help='Maximum number of pages/videos to download (default: 2)'
+        )
+        parser.add_argument(
+            '-d', '--depth',
+            type=int,
+            default=1,
+            help='Crawl depth for websites (YouTube uses suggestions)'
+        )
+        
+        # Behavior options
+        parser.add_argument(
+            '-q', '--quiet',
+            action='store_true',
+            help='Quiet mode - no interactive prompts'
+        )
+        parser.add_argument(
+            '-v', '--verbose',
+            action='store_true',
+            help='Verbose output'
+        )
+        parser.add_argument(
+            '--no-cleanup',
+            action='store_true',
+            help='Keep temporary files after download'
+        )
+        parser.add_argument(
+            '--skip-assets',
+            action='store_true',
+            help='Skip downloading assets (CSS, images, etc.)'
+        )
+        
+        # YouTube specific
+        parser.add_argument(
+            '--yt-format',
+            type=str,
+            default='best[ext=mp4]/best[height<=720]/best',
+            help='YouTube download format (default: best mp4 up to 720p)'
+        )
+        parser.add_argument(
+            '--yt-quality',
+            type=str,
+            choices=['best', '720p', '480p', '360p', 'worst'],
+            default='720p',
+            help='Preferred video quality for YouTube downloads'
+        )
+        
+        return parser
     
-    # Check for required packages
-    try:
-        import yt_dlp
-    except ImportError:
-        print("📦 Installing yt-dlp...")
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
-        import yt_dlp
+    def read_urls_from_file(self, file_path: str) -> List[str]:
+        """Read URLs from a file"""
+        urls = []
+        try:
+            with open(file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        urls.append(line)
+            logger.info(f"Read {len(urls)} URLs from {file_path}")
+        except Exception as e:
+            logger.error(f"Error reading file {file_path}: {e}")
+            sys.exit(1)
+        return urls
     
-    sites = []
+    def detect_download_mode(self, url: str) -> str:
+        """Auto-detect if URL is YouTube or regular website"""
+        youtube_patterns = [
+            'youtube.com/watch',
+            'youtu.be/',
+            'youtube.com/shorts',
+            'youtube.com/playlist'
+        ]
+        
+        for pattern in youtube_patterns:
+            if pattern in url:
+                return 'youtube'
+        return 'website'
     
-    if len(sys.argv) > 1:
-        sites = sys.argv[1:]
-    else:
-        user_input = input("Enter URL to download (or press Enter to exit): ").strip()
-        if user_input:
-            sites = [user_input]
+    def get_urls_to_download(self, args) -> List[str]:
+        """Get list of URLs to download from various sources"""
+        urls = []
+        
+        # Read from file if specified
+        if args.file:
+            urls.extend(self.read_urls_from_file(args.file))
+        
+        # Add URLs from command line
+        urls.extend(args.urls)
+        
+        # If still no URLs, prompt interactively
+        if not urls and not args.quiet:
+            while True:
+                url = input("Enter URL to download (or press Enter to finish): ").strip()
+                if not url:
+                    break
+                urls.append(url)
+        
+        # Remove duplicates
+        return list(dict.fromkeys(urls))
+    
+    def check_requirements(self):
+        """Check if required packages are installed"""
+        try:
+            import yt_dlp
+        except ImportError:
+            print("📦 Installing yt-dlp...")
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp"])
+            import yt_dlp
+        
+        try:
+            import fake_useragent
+        except ImportError:
+            print("📦 Installing fake-useragent...")
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "fake-useragent"])
+            import fake_useragent
+    
+    def setup_output_directories(self, output_dir: Optional[str], mode: str) -> str:
+        """Setup output directories based on mode"""
+        if output_dir:
+            return output_dir
+        
+        # Default output directories
+        if mode == 'youtube':
+            return os.path.join(os.getcwd(), "youtube_videos")
         else:
-            print("No URL provided. Exiting.")
-            sys.exit(0)
+            return os.path.join(os.getcwd(), "downloaded_sites")
     
-    downloader = CompleteWebsiteDownloader(max_pages=max_pages)
-    files = downloader.download_from_list(sites)
+    def print_banner(self):
+        """Print the application banner"""
+        print("="*60)
+        print("🚀 COMPLETE WEBSITE DOWNLOADER WITH YOUTUBE SUPPORT")
+        print("="*60)
     
-    if files:
-        print(f"\n🎉 Success! Downloaded {len(files)} items!")
-        print("💡 Run browser.py to view your downloaded videos!")
-    else:
-        print(f"\n❌ No videos downloaded. Check the URL and try again.")
+    def print_summary(self, args, urls, mode):
+        """Print download summary"""
+        print(f"\n📊 DOWNLOAD SUMMARY")
+        print(f"📁 Mode: {'YouTube' if mode == 'youtube' else 'Website'}")
+        print(f"📊 Max pages/videos: {args.max_pages}")
+        print(f"📂 Output directory: {args.output}")
+        print(f"📋 URLs to download: {len(urls)}")
+        for i, url in enumerate(urls, 1):
+            print(f"   {i}. {url}")
+        print("-"*40)
+    
+    def run(self):
+        """Main CLI entry point"""
+        # Parse arguments
+        args = self.parser.parse_args()
+        
+        # Check requirements
+        self.check_requirements()
+        
+        # Get URLs to download
+        urls = self.get_urls_to_download(args)
+        
+        if not urls:
+            print("❌ No URLs provided. Use -h for help.")
+            sys.exit(1)
+        
+        # Determine mode for each URL
+        if args.youtube:
+            # Force YouTube mode for all URLs
+            modes = ['youtube'] * len(urls)
+        elif args.website:
+            # Force website mode for all URLs
+            modes = ['website'] * len(urls)
+        else:
+            # Auto-detect mode for each URL
+            modes = [self.detect_download_mode(url) for url in urls]
+        
+        # Print banner
+        self.print_banner()
+        
+        # Set output directory
+        args.output = self.setup_output_directories(args.output, modes[0])
+        
+        # Print summary
+        self.print_summary(args, urls, modes[0])
+        
+        # Confirm if not in quiet mode
+        if not args.quiet:
+            confirm = input("\n⏳ Press Enter to start download (or Ctrl+C to cancel): ")
+        
+        # Process each URL
+        downloaded_files = []
+        start_time = time.time()
+        
+        for i, (url, mode) in enumerate(zip(urls, modes), 1):
+            print(f"\n{'='*60}")
+            print(f"📥 Downloading {i}/{len(urls)}: {url}")
+            print(f"🎯 Mode: {'YouTube' if mode == 'youtube' else 'Website'}")
+            print("="*60)
+            
+            try:
+                if mode == 'youtube':
+                    # Use YouTube downloader
+                    downloader = YouTubeDownloader(
+                        output_dir=args.output,
+                        max_pages=args.max_pages,
+                        yt_format=args.yt_format,
+                        yt_quality=args.yt_quality
+                    )
+                    result = downloader.download_youtube_with_suggestions(url)
+                    if result:
+                        downloaded_files.extend(result)
+                else:
+                    # Use website downloader
+                    downloader = CompleteWebsiteDownloader(
+                        output_dir=args.output,
+                        max_pages=args.max_pages,
+                        skip_assets=args.skip_assets
+                    )
+                    result = downloader.download_website(url)
+                    if result:
+                        downloaded_files.append(result)
+                        
+            except Exception as e:
+                print(f"❌ Error downloading {url}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Print final summary
+        end_time = time.time()
+        print(f"\n{'='*60}")
+        print("📊 FINAL SUMMARY")
+        print("="*60)
+        print(f"⏱️ Total time: {end_time - start_time:.1f} seconds")
+        print(f"✅ Successfully downloaded: {len(downloaded_files)} items")
+        print(f"📂 Output directory: {args.output}")
+        
+        if downloaded_files:
+            print(f"\n📋 Downloaded files:")
+            for file in downloaded_files:
+                if isinstance(file, dict):
+                    print(f"   • {file.get('title', 'Unknown')}")
+                else:
+                    print(f"   • {os.path.basename(file)}")
+            
+            print(f"\n💡 To view downloaded content:")
+            if any('youtube' in str(f).lower() for f in downloaded_files):
+                print("   - YouTube videos are saved as .page files")
+            print("   - Use a browser to open the .page files")
+            print("   - Or use the included browser.py script")
+        
+        return downloaded_files
+
+
+def main():
+    """Main entry point"""
+    try:
+        cli = CLIDownloader()
+        cli.run()
+    except KeyboardInterrupt:
+        print("\n\n❌ Download cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
