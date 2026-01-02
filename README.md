@@ -4,6 +4,8 @@
 
 OffInternet is a Python-based tool designed to reliably save complex web content—including complete websites with all assets or YouTube videos with related content—to your local machine for offline access.
 
+![source lines of code](https://sloc.xyz/github/lazerkatsweirdstuff/offinternet)
+
 ## Features
 
 - **Complete Website Archival**: Downloads entire websites including HTML, CSS, JavaScript, images, and other assets
