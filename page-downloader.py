@@ -2,7 +2,7 @@ import os
 import requests
 import zipfile
 import json
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs
 from bs4 import BeautifulSoup
 import time
 import hashlib
@@ -22,12 +22,320 @@ import io
 import yt_dlp
 import argparse
 import textwrap
-from typing import List, Optional
+from typing import List, Dict, Optional
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
+
+class YouTubeSuggestionsExtractor:
+    """
+    Enhanced YouTube Suggestions Extractor
+    Extracts suggested/recommended videos from a YouTube page.
+    """
+    
+    def __init__(self, user_agent: str = None):
+        """
+        Initialize the extractor.
+        
+        Args:
+            user_agent: Custom user agent string (optional)
+        """
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        })
+        
+    def extract_video_id(self, url: str) -> Optional[str]:
+        """
+        Extract video ID from various YouTube URL formats.
+        
+        Args:
+            url: YouTube video URL
+            
+        Returns:
+            Video ID string or None if not found
+        """
+        # Parse the URL
+        parsed = urlparse(url)
+        
+        # Handle different URL patterns
+        if 'youtu.be' in url:
+            # Shortened URL: https://youtu.be/VIDEO_ID
+            video_id = parsed.path.lstrip('/')
+            # Remove any query parameters from short URL
+            if '?' in video_id:
+                video_id = video_id.split('?')[0]
+            return video_id
+        elif 'youtube.com' in url:
+            # Standard URL: https://www.youtube.com/watch?v=VIDEO_ID
+            if 'watch' in parsed.path:
+                query_params = parse_qs(parsed.query)
+                video_id = query_params.get('v', [None])[0]
+                return video_id
+            # Embed URL: https://www.youtube.com/embed/VIDEO_ID
+            elif 'embed' in parsed.path:
+                video_id = parsed.path.split('/')[-1]
+                return video_id
+            # Shorts URL: https://www.youtube.com/shorts/VIDEO_ID
+            elif 'shorts' in parsed.path:
+                video_id = parsed.path.split('/')[-1]
+                return video_id
+        
+        return None
+    
+    def extract_from_html(self, html_content: str) -> List[Dict]:
+        """
+        Extract suggested videos from YouTube page HTML.
+        
+        Args:
+            html_content: Raw HTML of the YouTube page
+            
+        Returns:
+            List of dictionaries containing video information
+        """
+        suggestions = []
+        
+        # Pattern 1: Look for var ytInitialData (most reliable)
+        yt_data_pattern = r'var ytInitialData\s*=\s*({.*?});'
+        yt_data_match = re.search(yt_data_pattern, html_content, re.DOTALL)
+        
+        if yt_data_match:
+            try:
+                yt_data = json.loads(yt_data_match.group(1))
+                suggestions.extend(self._extract_from_yt_initial_data(yt_data))
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"   ⚠️ Error parsing ytInitialData: {e}")
+        
+        # Pattern 2: Look for watch-next-renderer elements (common for suggestions)
+        watch_next_pattern = r'"watchEndpoint":{"videoId":"([^"]+)"[^}]+"simpleText":"([^"]+)"'
+        matches = re.findall(watch_next_pattern, html_content)
+        
+        for video_id, title in matches[:20]:  # Limit to first 20 matches
+            if video_id and title and len(video_id) == 11:
+                suggestions.append({
+                    'title': title.replace('\\u0026', '&').replace('\\"', '"'),
+                    'url': f'https://www.youtube.com/watch?v={video_id}',
+                    'id': video_id
+                })
+        
+        # Pattern 3: Look for JSON-LD structured data
+        ld_json_pattern = r'<script type="application/ld\+json">(.*?)</script>'
+        ld_json_matches = re.findall(ld_json_pattern, html_content, re.DOTALL)
+        
+        for match in ld_json_matches:
+            try:
+                data = json.loads(match)
+                if isinstance(data, dict) and 'relatedLink' in data:
+                    # Extract related videos from JSON-LD
+                    related = data.get('relatedLink', [])
+                    for item in related:
+                        if 'url' in item:
+                            video_id = self.extract_video_id(item.get('url', ''))
+                            if video_id:
+                                suggestions.append({
+                                    'title': item.get('name', 'Untitled'),
+                                    'url': item.get('url', ''),
+                                    'id': video_id
+                                })
+            except json.JSONDecodeError:
+                continue
+        
+        # Remove duplicates based on video ID
+        unique_suggestions = []
+        seen_ids = set()
+        for video in suggestions:
+            if video['id'] and video['id'] not in seen_ids:
+                seen_ids.add(video['id'])
+                unique_suggestions.append(video)
+        
+        return unique_suggestions[:20]  # Return top 20 unique suggestions
+    
+    def _extract_from_yt_initial_data(self, yt_data: dict) -> List[Dict]:
+        """
+        Extract suggested videos from YouTube's initial data object.
+        
+        Args:
+            yt_data: YouTube's initial data dictionary
+            
+        Returns:
+            List of suggested video dictionaries
+        """
+        suggestions = []
+        
+        try:
+            # Try multiple paths to find suggested videos
+            # Path 1: Secondary results in watch page
+            contents = yt_data.get('contents', {}) \
+                .get('twoColumnWatchNextResults', {}) \
+                .get('secondaryResults', {}) \
+                .get('secondaryResults', {}) \
+                .get('results', [])
+            
+            if contents:
+                for item in contents:
+                    video_info = self._extract_video_info_from_item(item)
+                    if video_info:
+                        suggestions.append(video_info)
+            
+            # Path 2: Player overlays/end screen
+            if not suggestions:
+                items = yt_data.get('playerOverlays', {}) \
+                    .get('playerOverlayRenderer', {}) \
+                    .get('endScreen', {}) \
+                    .get('watchNextEndScreenRenderer', {}) \
+                    .get('results', [])
+                
+                for item in items:
+                    video_info = self._extract_video_info_from_item(item)
+                    if video_info:
+                        suggestions.append(video_info)
+            
+            # Path 3: Search for compactVideoRenderer in the entire data structure
+            def search_for_videos(obj, depth=0):
+                if depth > 10:  # Limit recursion depth
+                    return []
+                
+                found = []
+                if isinstance(obj, dict):
+                    # Check for video renderers
+                    for key, value in obj.items():
+                        if 'Renderer' in key and isinstance(value, dict):
+                            video_info = self._extract_video_info_from_item({key: value})
+                            if video_info:
+                                found.append(video_info)
+                        else:
+                            found.extend(search_for_videos(value, depth + 1))
+                elif isinstance(obj, list):
+                    for item in obj:
+                        found.extend(search_for_videos(item, depth + 1))
+                return found
+            
+            if not suggestions:
+                suggestions.extend(search_for_videos(yt_data))
+                
+        except (KeyError, AttributeError) as e:
+            print(f"   ⚠️ Error navigating ytInitialData: {e}")
+        
+        return suggestions
+    
+    def _extract_video_info_from_item(self, item: dict) -> Optional[Dict]:
+        """
+        Extract video information from a YouTube data item.
+        
+        Args:
+            item: YouTube data item dictionary
+            
+        Returns:
+            Video info dictionary or None
+        """
+        try:
+            # Try different renderer types
+            renderer_keys = ['compactVideoRenderer', 'videoRenderer', 
+                           'endScreenVideoRenderer', 'playlistVideoRenderer',
+                           'gridVideoRenderer', 'richItemRenderer']
+            
+            video_renderer = None
+            for key in renderer_keys:
+                if key in item:
+                    video_renderer = item[key]
+                    break
+            
+            if video_renderer:
+                video_id = video_renderer.get('videoId')
+                if not video_id:
+                    # Sometimes videoId is nested
+                    video_id = video_renderer.get('navigationEndpoint', {}) \
+                        .get('watchEndpoint', {}) \
+                        .get('videoId')
+                
+                # Extract title
+                title = ''
+                title_runs = video_renderer.get('title', {}) \
+                    .get('runs', [{}])
+                if title_runs:
+                    title = title_runs[0].get('text', '')
+                
+                # Alternative title path
+                if not title:
+                    title = video_renderer.get('title', {}) \
+                        .get('simpleText', '')
+                
+                # Another alternative title path
+                if not title:
+                    title = video_renderer.get('headline', {}) \
+                        .get('simpleText', '')
+                
+                if video_id and title and len(video_id) == 11:
+                    return {
+                        'title': title.replace('\\u0026', '&').replace('\\"', '"'),
+                        'url': f'https://www.youtube.com/watch?v={video_id}',
+                        'id': video_id,
+                        'channel': video_renderer.get('shortBylineText', {})
+                            .get('runs', [{}])[0]
+                            .get('text', 'Unknown Channel')
+                    }
+                    
+        except (KeyError, IndexError, AttributeError) as e:
+            pass
+        
+        return None
+    
+    def get_suggested_videos(self, youtube_url: str, max_results: int = 20) -> List[Dict]:
+        """
+        Main method to get suggested videos from a YouTube URL.
+        
+        Args:
+            youtube_url: URL of the YouTube video
+            max_results: Maximum number of suggestions to return
+            
+        Returns:
+            List of dictionaries with suggested video information
+        """
+        video_id = self.extract_video_id(youtube_url)
+        
+        if not video_id:
+            raise ValueError(f"Could not extract video ID from URL: {youtube_url}")
+        
+        # Construct the actual YouTube watch URL
+        watch_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        try:
+            # Fetch the YouTube page
+            response = self.session.get(watch_url, timeout=15)
+            response.raise_for_status()
+            
+            # Extract suggestions from HTML
+            suggestions = self.extract_from_html(response.text)
+            
+            # Limit results
+            return suggestions[:max_results]
+            
+        except requests.RequestException as e:
+            print(f"   ⚠️ Error fetching YouTube page: {e}")
+            return []
+    
+    def get_suggested_videos_as_array(self, youtube_url: str, max_results: int = 20) -> List[str]:
+        """
+        Get suggested videos as a simple array of URLs.
+        
+        Args:
+            youtube_url: URL of the YouTube video
+            max_results: Maximum number of suggestions to return
+            
+        Returns:
+            List of suggested video URLs
+        """
+        suggestions = self.get_suggested_videos(youtube_url, max_results)
+        return [video['url'] for video in suggestions]
+
 
 class YouTubeDownloader:
     def __init__(self, output_dir=None, max_pages=10, yt_format=None, yt_quality='720p'):
@@ -48,6 +356,9 @@ class YouTubeDownloader:
         self.max_pages = max_pages
         self.downloaded_videos = set()
         self.suggested_queue = deque()
+        
+        # Initialize suggestions extractor
+        self.suggestions_extractor = YouTubeSuggestionsExtractor()
         
         # Set format based on quality preference
         if yt_format:
@@ -90,8 +401,49 @@ class YouTubeDownloader:
         }
         self.session.headers.update(headers)
     
-    def get_suggested_videos(self, video_id, max_results=20):
-        """Get suggested videos from YouTube"""
+    def get_suggested_videos(self, video_id=None, url=None, max_results=20):
+        """Get suggested videos from YouTube using enhanced extractor"""
+        suggested_videos = []
+        
+        try:
+            # Get URL for extraction
+            if url:
+                extract_url = url
+            elif video_id:
+                extract_url = f"https://www.youtube.com/watch?v={video_id}"
+            else:
+                return []
+            
+            print(f"   🔍 Fetching suggested videos...")
+            
+            # Use the enhanced extractor
+            suggestions = self.suggestions_extractor.get_suggested_videos(
+                extract_url, 
+                max_results=max_results
+            )
+            
+            for suggested in suggestions:
+                suggested_id = suggested['id']
+                if suggested_id != video_id and suggested_id not in self.downloaded_videos:
+                    suggested_videos.append({
+                        'id': suggested_id,
+                        'title': suggested.get('title', f"Video {suggested_id}")[:100],
+                        'channel': suggested.get('channel', 'Unknown Channel'),
+                        'url': suggested['url']
+                    })
+                    if len(suggested_videos) >= max_results:
+                        break
+            
+            print(f"   ✅ Found {len(suggested_videos)} suggested videos")
+            return suggested_videos[:max_results]
+            
+        except Exception as e:
+            print(f"   ⚠️ Error fetching suggested videos: {e}")
+            # Fallback to old method
+            return self._get_suggested_videos_fallback(video_id, max_results)
+    
+    def _get_suggested_videos_fallback(self, video_id, max_results=20):
+        """Fallback method to get suggested videos if enhanced extractor fails"""
         suggested_videos = []
         
         try:
@@ -115,12 +467,10 @@ class YouTubeDownloader:
                                 })
                                 if len(suggested_videos) >= max_results:
                                     break
+        except Exception:
+            pass
             
-            return suggested_videos[:max_results]
-            
-        except Exception as e:
-            print(f"   ⚠️ Error fetching suggested videos: {e}")
-            return []
+        return suggested_videos[:max_results]
     
     def download_video_simple(self, url, depth=0):
         """Simplified video download without complex processing"""
@@ -241,16 +591,26 @@ class YouTubeDownloader:
                 # Mark as downloaded
                 self.downloaded_videos.add(video_id)
                 
-                # Get suggested videos
+                # Get suggested videos using enhanced extractor
                 if depth < self.max_pages - 1:
-                    suggested_videos = self.get_suggested_videos(video_id, max_results=3)
+                    print(f"   🔍 Finding related videos for next download...")
+                    suggested_videos = self.get_suggested_videos(
+                        video_id=video_id, 
+                        max_results=min(5, self.max_pages - depth - 1)
+                    )
+                    
                     for suggested in suggested_videos:
                         if suggested['id'] not in self.downloaded_videos:
                             self.suggested_queue.append({
                                 'url': suggested['url'],
                                 'depth': depth + 1,
-                                'parent_id': video_id
+                                'parent_id': video_id,
+                                'title': suggested['title'],
+                                'channel': suggested.get('channel', 'Unknown Channel')
                             })
+                    
+                    if suggested_videos:
+                        print(f"   📋 Added {len(suggested_videos)} suggestions to queue")
                 
                 return {
                     'success': True,
@@ -522,7 +882,7 @@ class YouTubeDownloader:
             return None
     
     def download_youtube_with_suggestions(self, start_url):
-        """Main download method"""
+        """Main download method with enhanced suggestions"""
         print(f"\n{'='*60}")
         print(f"🎬 YOUTUBE DOWNLOADER")
         print(f"📊 Max videos: {self.max_pages}")
@@ -546,6 +906,8 @@ class YouTubeDownloader:
             url = next_video['url']
             
             print(f"\n📄 Downloading video {current_page}/{self.max_pages}")
+            if 'title' in next_video:
+                print(f"   📺 Title: {next_video['title']}")
             
             # Download the video
             video_data = self.download_video_simple(url, next_video['depth'])
@@ -603,7 +965,7 @@ class CompleteWebsiteDownloader:
         self.max_pages = max_pages
         self.skip_assets = skip_assets
         
-        # Initialize YouTube downloader
+        # Initialize YouTube downloader with enhanced suggestions
         youtube_output_dir = os.path.join(self.output_dir, "youtube_videos")
         self.youtube_downloader = YouTubeDownloader(
             output_dir=youtube_output_dir,
@@ -1697,7 +2059,7 @@ def run_with_cli():
         
         try:
             if mode == 'youtube':
-                # Use YouTube downloader
+                # Use YouTube downloader with enhanced suggestions
                 output_dir = args.output or os.path.join(os.getcwd(), "youtube_videos")
                 downloader = YouTubeDownloader(
                     output_dir=output_dir,
@@ -1768,7 +2130,7 @@ def run_original_behavior():
             print("No URL provided. Exiting.")
             sys.exit(0)
     
-    # Create downloader and run - EXACTLY like original
+    # Create downloader and run - EXACTLY like original but with enhanced YouTube suggestions
     downloader = CompleteWebsiteDownloader(max_pages=max_pages)
     files = downloader.download_from_list(sites)
     
