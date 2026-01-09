@@ -24,10 +24,24 @@ import argparse
 import textwrap
 from typing import List, Dict, Optional
 import logging
+import signal
+import shutil
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
+
+# Add signal handling for Ctrl+C
+stop_requested = False
+
+def signal_handler(sig, frame):
+    global stop_requested
+    print(f"\n\n⚠️  Ctrl+C detected! Finishing current download and exiting gracefully...")
+    stop_requested = True
+
+# Register the signal handler
+signal.signal(signal.SIGINT, signal_handler)
+
 
 class YouTubeSuggestionsExtractor:
     """
@@ -564,7 +578,6 @@ class YouTubeDownloader:
                 final_video_file = os.path.join(self.output_dir, f"{video_id}.{file_ext}")
                 
                 # Copy video file
-                import shutil
                 shutil.copy2(video_file, final_video_file)
                 
                 # Copy info file if exists
@@ -592,7 +605,7 @@ class YouTubeDownloader:
                 self.downloaded_videos.add(video_id)
                 
                 # Get suggested videos using enhanced extractor
-                if depth < self.max_pages - 1:
+                if depth < self.max_pages - 1 and not stop_requested:
                     print(f"   🔍 Finding related videos for next download...")
                     suggested_videos = self.get_suggested_videos(
                         video_id=video_id, 
@@ -600,7 +613,7 @@ class YouTubeDownloader:
                     )
                     
                     for suggested in suggested_videos:
-                        if suggested['id'] not in self.downloaded_videos:
+                        if suggested['id'] not in self.downloaded_videos and not stop_requested:
                             self.suggested_queue.append({
                                 'url': suggested['url'],
                                 'depth': depth + 1,
@@ -901,7 +914,7 @@ class YouTubeDownloader:
         
         current_page = 1
         
-        while self.suggested_queue and current_page <= self.max_pages:
+        while self.suggested_queue and current_page <= self.max_pages and not stop_requested:
             next_video = self.suggested_queue.popleft()
             url = next_video['url']
             
@@ -927,12 +940,11 @@ class YouTubeDownloader:
                 print(f"❌ Failed to download: {url}")
             
             # Small delay between downloads
-            if current_page <= self.max_pages:
+            if current_page <= self.max_pages and not stop_requested:
                 time.sleep(2)
         
         # Clean up temp directory
         try:
-            import shutil
             shutil.rmtree(self.temp_dir)
             print(f"🧹 Cleaned up temp directory: {self.temp_dir}")
         except Exception as e:
@@ -1290,7 +1302,7 @@ class CompleteWebsiteDownloader:
         crawled_pages = 0
         consecutive_failures = 0
         
-        while self.pages_to_crawl and crawled_pages < self.max_pages:
+        while self.pages_to_crawl and crawled_pages < self.max_pages and not stop_requested:
             if consecutive_failures >= 3:
                 print("    🚨 Too many failures, trying recovery...")
                 if not self.recover_from_failures():
@@ -1311,13 +1323,13 @@ class CompleteWebsiteDownloader:
                 # Extract links for further crawling
                 new_links = self.extract_all_links_complete(page_data['content'], current_url)
                 for link in new_links:
-                    if link not in self.visited_urls and link not in self.failed_urls:
+                    if link not in self.visited_urls and link not in self.failed_urls and not stop_requested:
                         self.visited_urls.add(link)
                         self.pages_to_crawl.append(link)
                         print(f"      🔗 Found new page: {self.get_url_display_name(link)}")
                 
                 # Download ALL assets including CSS from this page
-                if not self.skip_assets:
+                if not self.skip_assets and not stop_requested:
                     self.download_all_assets_enhanced(page_data['content'], current_url, downloaded_content)
                 
                 time.sleep(random.uniform(1, 2))
@@ -1328,7 +1340,7 @@ class CompleteWebsiteDownloader:
         print(f"✅ Crawl complete: {crawled_pages} pages")
         
         # Final asset discovery pass
-        if not self.skip_assets:
+        if not self.skip_assets and not stop_requested:
             self.final_asset_discovery(downloaded_content)
 
     def get_url_display_name(self, url):
@@ -1598,7 +1610,7 @@ class CompleteWebsiteDownloader:
         total_assets = len(assets)
         
         for j, asset_url in enumerate(assets):
-            if asset_url in downloaded_content['assets'] or asset_url in self.failed_urls:
+            if asset_url in downloaded_content['assets'] or asset_url in self.failed_urls or stop_requested:
                 continue
             
             filename = os.path.basename(urlparse(asset_url).path) or asset_url[:60]
@@ -1675,7 +1687,7 @@ class CompleteWebsiteDownloader:
             css_assets = self.extract_urls_from_css(css_text, css_url)
             
             for asset_url in css_assets:
-                if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls:
+                if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls and not stop_requested:
                     print(f"      📥 CSS asset: {os.path.basename(asset_url) or asset_url[:50]}")
                     asset_data = self.download_asset_complete(asset_url)
                     if asset_data:
@@ -1701,7 +1713,7 @@ class CompleteWebsiteDownloader:
             base_domain = urlparse(page_url).netloc
             for asset_path in common_assets:
                 asset_url = f"https://{base_domain}{asset_path}"
-                if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls:
+                if asset_url not in downloaded_content['assets'] and asset_url not in self.failed_urls and not stop_requested:
                     print(f"    🔎 Checking for common asset: {asset_path}")
                     asset_data = self.download_asset_complete(asset_url)
                     if asset_data:
@@ -2145,8 +2157,31 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n❌ Download cancelled by user")
-        sys.exit(1)
+        print(f"\n\n{'='*60}")
+        print("🛑 DOWNLOAD INTERRUPTED BY USER (Ctrl+C)")
+        print("💾 Downloaded files have been saved")
+        print("🧹 Cleaning up temporary files...")
+        print(f"{'='*60}")
+        
+        # Global cleanup for any remaining temp files
+        try:
+            # Find and remove any temp directories
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            possible_temp_dirs = [
+                os.path.join(script_dir, "youtube_videos", "temp"),
+                os.path.join(os.getcwd(), "youtube_videos", "temp"),
+                os.path.join(script_dir, "temp"),
+                os.path.join(os.getcwd(), "temp"),
+            ]
+            
+            for temp_dir in possible_temp_dirs:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    print(f"✓ Cleaned up: {temp_dir}")
+        except Exception as e:
+            print(f"⚠️  Cleanup warning: {e}")
+        
+        sys.exit(0)
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
         import traceback
