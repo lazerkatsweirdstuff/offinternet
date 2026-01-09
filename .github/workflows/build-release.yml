@@ -21,12 +21,11 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'  # Changed from 3.9 to 3.10
+        python-version: '3.10' 
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Core dependencies
         pip install beautifulsoup4>=4.12.0
         pip install requests>=2.31.0
         pip install selenium>=4.15.0
@@ -35,26 +34,20 @@ jobs:
         pip install Pillow>=10.1.0
         pip install brotli>=1.1.0
         pip install lxml>=4.9.0
-        # Selenium WebDriver manager
         pip install webdriver-manager>=4.0.0
-        # Optional async enhancement
         pip install aiohttp>=3.9.0
-        # Build tool
         pip install pyinstaller
 
-    - name: Build executables with explicit data inclusion
+    - name: Build executables 
       run: |
-        # First, let's find the fake_useragent data path
         $fakeUserAgentPath = python -c "import fake_useragent; import os; print(os.path.dirname(fake_useragent.__file__))"
         $dataPath = Join-Path $fakeUserAgentPath "data"
         
-        # Build page-browser.exe
         pyinstaller --onefile `
           --name page-browser `
           --add-data "$dataPath;fake_useragent/data" `
           page-browser.py
         
-        # Build page-downloader.exe  
         pyinstaller --onefile `
           --name page-downloader `
           --add-data "$dataPath;fake_useragent/data" `
@@ -63,21 +56,16 @@ jobs:
 
     - name: Prepare and upload executables to repository
       run: |
-        # Create the executables directory if it doesn't exist
         mkdir -p executables
         
-        # Copy the built executables to the target names
         cp dist/page-browser.exe executables/website-runner.exe
         cp dist/page-downloader.exe executables/website-downloader.exe
         
-        # Configure git
         git config --global user.name "GitHub Actions Bot"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Add the executables directory
         git add executables/
         
-        # Check if there are changes to commit
         if git diff --staged --quiet; then
           echo "No changes to commit"
         else
